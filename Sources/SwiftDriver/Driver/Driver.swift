@@ -43,6 +43,7 @@ public struct Driver {
   enum Error: Swift.Error {
     case invalidDriverName(String)
     case invalidInput(String)
+    case subcommandPassedToDriver
   }
   
   /// The set of environment variables that are visible to the driver and
@@ -190,17 +191,21 @@ public struct Driver {
   public init(
     args: [String],
     env: [String: String] = ProcessEnv.vars,
-    diagnosticsHandler: @escaping DiagnosticsEngine.DiagnosticsHandler = Driver.stderrDiagnosticsHandler
+    diagnosticsEngine: DiagnosticsEngine = DiagnosticsEngine(handlers: [Driver.stderrDiagnosticsHandler])
   ) throws {
     self.env = env
-    
-    // FIXME: Determine if we should run as subcommand.
 
-    self.diagnosticEngine = DiagnosticsEngine(handlers: [diagnosticsHandler])
+    self.diagnosticEngine = diagnosticsEngine
+
+    if case .subcommand = try Self.invocationRunMode(forArgs: args).mode {
+      throw Error.subcommandPassedToDriver
+    }
+
     var args = try Self.expandResponseFiles(args, diagnosticsEngine: self.diagnosticEngine)[...]
+
     self.driverKind = try Self.determineDriverKind(args: &args)
     self.optionTable = OptionTable()
-    self.parsedOptions = try optionTable.parse(Array(args))
+    self.parsedOptions = try optionTable.parse(Array(args), for: self.driverKind)
 
     let explicitTarget = (self.parsedOptions.getLastArgument(.target)?.asSingle)
       .map {
@@ -351,6 +356,54 @@ public struct Driver {
   }
 }
 
+extension Driver {
+
+  public enum InvocationRunMode: Equatable {
+    case normal(isRepl: Bool)
+    case subcommand(String)
+  }
+
+  /// Determines whether the given arguments constitute a normal invocation,
+  /// or whether they invoke a subcommand.
+  ///
+  /// Returns the invocation mode along with the arguments modified for that mode.
+  public static func invocationRunMode(
+    forArgs args: [String]
+  ) throws -> (mode: InvocationRunMode, args: [String]) {
+
+    assert(!args.isEmpty)
+
+    let execName = try VirtualPath(path: args[0]).basenameWithoutExt
+
+    // If we are not run as 'swift' or there are no program arguments, always invoke as normal.
+    guard execName == "swift", args.count > 1 else { return (.normal(isRepl: false), args) }
+
+    // Otherwise, we have a program argument.
+    let firstArg = args[1]
+
+    // If it looks like an option or a path, then invoke in interactive mode with the arguments as given.
+    if firstArg.hasPrefix("-") || firstArg.hasPrefix("/") || firstArg.contains(".") {
+        return (.normal(isRepl: false), args)
+    }
+
+    // Otherwise, we should have some sort of subcommand.
+
+    var updatedArgs = args
+
+    // If it is the "built-in" 'repl', then use the normal driver.
+    if firstArg == "repl" {
+        updatedArgs.remove(at: 1)
+        return (.normal(isRepl: true), updatedArgs)
+    }
+
+    let subcommand = "swift-\(firstArg)"
+
+    updatedArgs.replaceSubrange(0...1, with: [subcommand])
+
+    return (.subcommand(subcommand), updatedArgs)
+  }
+}
+
 // MARK: - Response files.
 extension Driver {
   /// Tokenize a single line in a response file.
@@ -495,7 +548,7 @@ extension Driver {
     // We just need to invoke the corresponding tool if the kind isn't Swift compiler.
     guard driverKind.isSwiftCompiler else {
       let swiftCompiler = try getSwiftCompilerPath()
-      return try exec(path: swiftCompiler.pathString, args: ["swift"] + parsedOptions.commandLine)
+      return try exec(path: swiftCompiler.pathString, args: driverKind.usageArgs + parsedOptions.commandLine)
     }
 
     if parsedOptions.contains(.help) || parsedOptions.contains(.helpHidden) {
@@ -636,7 +689,7 @@ extension Driver {
 
     // For batch mode, collect information
     if wantBatchMode {
-      let batchSeed = parseIntOption(&parsedOptions, option: .driverBatchSeed, diagnosticsEngine: diagnosticsEngine) ?? 0
+      let batchSeed = parseIntOption(&parsedOptions, option: .driverBatchSeed, diagnosticsEngine: diagnosticsEngine)
       let batchCount = parseIntOption(&parsedOptions, option: .driverBatchCount, diagnosticsEngine: diagnosticsEngine)
       let batchSizeLimit = parseIntOption(&parsedOptions, option: .driverBatchSizeLimit, diagnosticsEngine: diagnosticsEngine)
       return .batchCompile(BatchModeInfo(seed: batchSeed, count: batchCount, sizeLimit: batchSizeLimit))
@@ -789,6 +842,9 @@ extension Driver {
         diagnosticsEngine.emit(.error_i_mode(driverKind))
 
       case .repl, .deprecatedIntegratedRepl, .lldbRepl:
+        compilerOutputType = nil
+
+      case .interpret:
         compilerOutputType = nil
 
       default:

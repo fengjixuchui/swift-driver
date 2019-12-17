@@ -9,7 +9,8 @@
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
-/// Describes which mode the driver is in, which dictates
+
+/// Describes which mode the driver is in.
 public enum DriverKind {
   case interactive
   case batch
@@ -44,6 +45,28 @@ extension DriverKind {
 
     case .moduleWrap:
       return "swift-modulewrap"
+    }
+  }
+
+  public var usageArgs: [String] {
+    switch self {
+    case .autolinkExtract:
+      return ["swift-autolink-extract"]
+
+    case .batch:
+      return ["swiftc"]
+
+    case .frontend:
+      return ["swift", "-frontend"]
+
+    case .indent:
+      return ["swift-indent"]
+
+    case .interactive:
+      return ["swift"]
+
+    case .moduleWrap:
+      return ["swift-modulewrap"]
     }
   }
 

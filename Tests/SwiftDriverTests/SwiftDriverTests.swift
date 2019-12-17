@@ -21,7 +21,7 @@ final class SwiftDriverTests: XCTestCase {
       let results = try options.parse([
         "input1", "-color-diagnostics", "-Ifoo", "-I", "bar spaces",
         "-I=wibble", "input2", "-module-name", "main",
-        "-sanitize=a,b,c", "--", "-foo", "-bar"])
+        "-sanitize=a,b,c", "--", "-foo", "-bar"], for: .batch)
       XCTAssertEqual(results.description,
                      "input1 -color-diagnostics -I foo -I 'bar spaces' -I=wibble input2 -module-name main -sanitize=a,b,c -- -foo -bar")
     }
@@ -29,21 +29,67 @@ final class SwiftDriverTests: XCTestCase {
   func testParseErrors() {
     let options = OptionTable()
 
-    XCTAssertThrowsError(try options.parse(["-unrecognized"])) { error in
+    XCTAssertThrowsError(try options.parse(["-unrecognized"], for: .batch)) { error in
       XCTAssertEqual(error as? OptionParseError, .unknownOption(index: 0, argument: "-unrecognized"))
     }
 
-    XCTAssertThrowsError(try options.parse(["-I"])) { error in
+    XCTAssertThrowsError(try options.parse(["-I"], for: .batch)) { error in
       XCTAssertEqual(error as? OptionParseError, .missingArgument(index: 0, argument: "-I"))
     }
 
-    XCTAssertThrowsError(try options.parse(["-color-diagnostics", "-I"])) { error in
+    XCTAssertThrowsError(try options.parse(["-color-diagnostics", "-I"], for: .batch)) { error in
       XCTAssertEqual(error as? OptionParseError, .missingArgument(index: 1, argument: "-I"))
     }
 
-    XCTAssertThrowsError(try options.parse(["-module-name"])) { error in
+    XCTAssertThrowsError(try options.parse(["-module-name"], for: .batch)) { error in
       XCTAssertEqual(error as? OptionParseError, .missingArgument(index: 0, argument: "-module-name"))
     }
+
+    XCTAssertThrowsError(try options.parse(["-o"], for: .interactive)) { error in
+      XCTAssertEqual(error as? OptionParseError, .unsupportedOption(index: 0, argument: "-o", option: .o, currentDriverKind: .interactive))
+    }
+
+    XCTAssertThrowsError(try options.parse(["-repl"], for: .batch)) { error in
+      XCTAssertEqual(error as? OptionParseError, .unsupportedOption(index: 0, argument: "-repl", option: .repl, currentDriverKind: .batch))
+    }
+
+  }
+
+  func testInvocationRunModes() throws {
+
+    let driver1 = try Driver.invocationRunMode(forArgs: ["swift"])
+    XCTAssertEqual(driver1.mode, .normal(isRepl: false))
+    XCTAssertEqual(driver1.args, ["swift"])
+
+    let driver2 = try Driver.invocationRunMode(forArgs: ["swift", "-buzz"])
+    XCTAssertEqual(driver2.mode, .normal(isRepl: false))
+    XCTAssertEqual(driver2.args, ["swift", "-buzz"])
+
+    let driver3 = try Driver.invocationRunMode(forArgs: ["swift", "/"])
+    XCTAssertEqual(driver3.mode, .normal(isRepl: false))
+    XCTAssertEqual(driver3.args, ["swift", "/"])
+
+    let driver4 = try Driver.invocationRunMode(forArgs: ["swift", "./foo"])
+    XCTAssertEqual(driver4.mode, .normal(isRepl: false))
+    XCTAssertEqual(driver4.args, ["swift", "./foo"])
+
+    let driver5 = try Driver.invocationRunMode(forArgs: ["swift", "repl"])
+    XCTAssertEqual(driver5.mode, .normal(isRepl: true))
+    XCTAssertEqual(driver5.args, ["swift"])
+
+    let driver6 = try Driver.invocationRunMode(forArgs: ["swift", "foo", "bar"])
+    XCTAssertEqual(driver6.mode, .subcommand("swift-foo"))
+    XCTAssertEqual(driver6.args, ["swift-foo", "bar"])
+  }
+
+  func testSubcommandsHandling() throws {
+
+    XCTAssertNoThrow(try Driver(args: ["swift"]))
+    XCTAssertNoThrow(try Driver(args: ["swift", "-I=foo"]))
+    XCTAssertNoThrow(try Driver(args: ["swift", ".foo"]))
+    XCTAssertNoThrow(try Driver(args: ["swift", "/foo"]))
+
+    XCTAssertThrowsError(try Driver(args: ["swift", "foo"]))
   }
 
   func testDriverKindParsing() throws {
@@ -111,11 +157,11 @@ final class SwiftDriverTests: XCTestCase {
   }
 
   func testInputFiles() throws {
-    let driver1 = try Driver(args: ["swift", "a.swift", "/tmp/b.swift"])
+    let driver1 = try Driver(args: ["swiftc", "a.swift", "/tmp/b.swift"])
     XCTAssertEqual(driver1.inputFiles,
                    [ TypedVirtualPath(file: .relative(RelativePath("a.swift")), type: .swift),
                      TypedVirtualPath(file: .absolute(AbsolutePath("/tmp/b.swift")), type: .swift) ])
-    let driver2 = try Driver(args: ["swift", "a.swift", "-working-directory", "/wobble", "/tmp/b.swift"])
+    let driver2 = try Driver(args: ["swiftc", "a.swift", "-working-directory", "/wobble", "/tmp/b.swift"])
     XCTAssertEqual(driver2.inputFiles,
                    [ TypedVirtualPath(file: .absolute(AbsolutePath("/wobble/a.swift")), type: .swift),
                      TypedVirtualPath(file: .absolute(AbsolutePath("/tmp/b.swift")), type: .swift) ])
@@ -256,7 +302,7 @@ final class SwiftDriverTests: XCTestCase {
       XCTAssertEqual(driver.moduleName, "main")
     }
     
-    try assertNoDriverDiagnostics(args: "swiftc", "-repl") { driver in
+    try assertNoDriverDiagnostics(args: "swift", "-repl") { driver in
       XCTAssertNil(driver.moduleOutput)
       XCTAssertEqual(driver.moduleName, "REPL")
     }
@@ -545,7 +591,7 @@ final class SwiftDriverTests: XCTestCase {
       XCTAssertFalse(cmd.contains(.flag("-dylib")))
       XCTAssertFalse(cmd.contains(.flag("-shared")))
     }
-
+    
     do {
       // linux target
       var driver = try Driver(args: commonArgs + ["-emit-library", "-target", "x86_64-unknown-linux"])
@@ -838,6 +884,72 @@ final class SwiftDriverTests: XCTestCase {
 
   }
 
+  func testImmediateMode() throws {
+    do {
+      var driver = try Driver(args: ["swift", "foo.swift"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      XCTAssertEqual(job.inputs.count, 1)
+      XCTAssertEqual(job.inputs[0].file, .relative(RelativePath("foo.swift")))
+      XCTAssertEqual(job.outputs.count, 0)
+      XCTAssertTrue(job.commandLine.contains(.flag("-frontend")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-interpret")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-module-name")))
+      XCTAssertTrue(job.commandLine.contains(.flag("foo")))
+
+      XCTAssertFalse(job.commandLine.contains(.flag("--")))
+
+      #if os(macOS)
+      XCTAssertTrue(job.extraEnvironment.keys.contains("DYLD_LIBRARY_PATH"))
+      #elseif os(Linux)
+      XCTAssertTrue(job.extraEnvironment.keys.contains("LD_LIBRARY_PATH"))
+      #endif
+    }
+
+    do {
+      var driver = try Driver(args: ["swift", "foo.swift", "-some", "args", "-for=foo"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      XCTAssertEqual(job.inputs.count, 1)
+      XCTAssertEqual(job.inputs[0].file, .relative(RelativePath("foo.swift")))
+      XCTAssertEqual(job.outputs.count, 0)
+      XCTAssertTrue(job.commandLine.contains(.flag("-frontend")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-interpret")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-module-name")))
+      XCTAssertTrue(job.commandLine.contains(.flag("foo")))
+      XCTAssertTrue(job.commandLine.contains(.flag("--")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-some")))
+      XCTAssertTrue(job.commandLine.contains(.flag("args")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-for=foo")))
+    }
+    #if os(macOS)
+    do {
+      var driver = try Driver(args: ["swift", "-L/path/to/lib", "-F/path/to/framework", "foo.swift"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      XCTAssertEqual(job.inputs.count, 1)
+      XCTAssertEqual(job.inputs[0].file, .relative(RelativePath("foo.swift")))
+      XCTAssertEqual(job.outputs.count, 0)
+      XCTAssertTrue(job.extraEnvironment.contains { $0 == "DYLD_LIBRARY_PATH" && $1.contains("/path/to/lib") })
+      XCTAssertTrue(job.extraEnvironment.contains { $0 == "DYLD_FRAMEWORK_PATH" && $1.contains("/path/to/framework") })
+    }
+    #elseif os(Linux)
+    do {
+      var driver = try Driver(args: ["swift", "-L/path/to/lib", "foo.swift"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      XCTAssertEqual(job.inputs.count, 1)
+      XCTAssertEqual(job.inputs[0].file, .relative(RelativePath("foo.swift")))
+      XCTAssertEqual(job.outputs.count, 0)
+      XCTAssertTrue(job.extraEnvironment.contains { $0 == "LD_LIBRARY_PATH" && $1.contains("/path/to/lib") })
+    }
+    #endif
+  }
+
   func testTargetTriple() throws {
     let driver1 = try Driver(args: ["swiftc", "-c", "foo.swift", "-module-name", "Foo"])
 
@@ -946,11 +1058,23 @@ final class SwiftDriverTests: XCTestCase {
   }
   
   func testToolchainUtilities() throws {
-    // FIXME: This doesn't work on Linux.
-  #if os(macOS)
     let swiftVersion = try DarwinToolchain(env: ProcessEnv.vars).swiftCompilerVersion()
     assertString(swiftVersion, contains: "Swift version ")
-  #endif
+  }
+  
+  func testToolchainClangPath() {
+    // TODO: remove this conditional check once DarwinToolchain does not requires xcrun to look for clang.
+    var toolchain: Toolchain
+    #if os(macOS)
+    toolchain = DarwinToolchain(env: ProcessEnv.vars)
+    #else
+    toolchain = GenericUnixToolchain(env: ProcessEnv.vars)
+    #endif
+    
+    XCTAssertEqual(
+      try? toolchain.getToolPath(.swiftCompiler).parentDirectory,
+      try? toolchain.getToolPath(.clang).parentDirectory
+    )
   }
 }
 
