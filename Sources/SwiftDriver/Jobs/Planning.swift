@@ -9,6 +9,18 @@
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
+
+public enum PlanningError: Error, DiagnosticData {
+  case replReceivedInput
+
+  public var description: String {
+    switch self {
+    case .replReceivedInput:
+      return "REPL mode requires no input files"
+    }
+  }
+}
+
 /// Planning for builds
 extension Driver {
   /// Plan a standard compilation, which produces jobs for compiling separate
@@ -132,7 +144,11 @@ extension Driver {
 
     // If we should generate a dSYM, do so.
     if let linkJob = link, targetTriple.isDarwin, debugInfoLevel != nil {
-      jobs.append(try generateDSYMJob(inputs: linkJob.outputs))
+      let dsymJob = try generateDSYMJob(inputs: linkJob.outputs)
+      jobs.append(dsymJob)
+      if shouldVerifyDebugInfo {
+        jobs.append(try verifyDebugInfoJob(inputs: dsymJob.outputs))
+      }
     }
 
     // FIXME: Lots of follow-up actions for merging modules, etc.
@@ -145,7 +161,10 @@ extension Driver {
     // Plan the build.
     switch compilerMode {
     case .repl:
-      fatalError("Not yet supported")
+      if !inputFiles.isEmpty {
+        throw PlanningError.replReceivedInput
+      }
+      return [try replJob()]
 
     case .immediate:
       return [try interpretJob(inputs: inputFiles)]
