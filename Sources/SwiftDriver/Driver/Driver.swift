@@ -70,9 +70,6 @@ public struct Driver {
   /// The set of parsed options.
   var parsedOptions: ParsedOptions
 
-  /// The Swift compiler executable.
-  public let swiftCompiler: AbsolutePath
-
   /// Extra command-line arguments to pass to the Swift compiler.
   public let swiftCompilerPrefixArgs: [String]
 
@@ -222,16 +219,16 @@ public struct Driver {
 
     // Find the Swift compiler executable.
     if let frontendPath = self.parsedOptions.getLastArgument(.driverUseFrontendPath) {
-      let frontendCommandLine = frontendPath.asSingle.split(separator: ";").map { String($0) }
+      var frontendCommandLine = frontendPath.asSingle.split(separator: ";").map { String($0) }
       if frontendCommandLine.isEmpty {
         self.diagnosticEngine.emit(.error_no_swift_frontend)
-        self.swiftCompiler = try self.toolchain.getToolPath(.swiftCompiler)
+        self.swiftCompilerPrefixArgs = []
       } else {
-        self.swiftCompiler = try AbsolutePath(validating: frontendCommandLine.first!)
+        let frontendPath = frontendCommandLine.removeFirst()
+        self.toolchain.overrideToolPath(.swiftCompiler, path: try AbsolutePath(validating: frontendPath))
+        self.swiftCompilerPrefixArgs = frontendCommandLine
       }
-      self.swiftCompilerPrefixArgs = Array(frontendCommandLine.dropFirst())
     } else {
-      self.swiftCompiler = try self.toolchain.getToolPath(.swiftCompiler)
       self.swiftCompilerPrefixArgs = []
     }
 
@@ -287,8 +284,7 @@ public struct Driver {
       moduleOutput: self.moduleOutput,
       inputFiles: inputFiles,
       diagnosticEngine: diagnosticEngine,
-      actualSwiftVersion:
-        try? toolchain.swiftCompilerVersion(self.swiftCompiler)
+      actualSwiftVersion: try? toolchain.swiftCompilerVersion()
     )
 
     self.sdkPath = Self.computeSDKPath(&parsedOptions, compilerMode: compilerMode, toolchain: toolchain, diagnosticsEngine: diagnosticEngine, env: env)
@@ -299,9 +295,10 @@ public struct Driver {
                                                                                outputFileMap: outputFileMap)
 
     self.enabledSanitizers = try Self.parseSanitizerArgValues(
-      &parsedOptions, diagnosticEngine: diagnosticEngine,
-      toolchain: toolchain, targetTriple: targetTriple,
-      swiftCompiler: swiftCompiler)
+      &parsedOptions,
+      diagnosticEngine: diagnosticEngine,
+      toolchain: toolchain,
+      targetTriple: targetTriple)
 
     // Supplemental outputs.
     self.dependenciesFilePath = try Self.computeSupplementaryOutputPath(
@@ -562,12 +559,21 @@ extension Driver {
   ) throws {
     // We just need to invoke the corresponding tool if the kind isn't Swift compiler.
     guard driverKind.isSwiftCompiler else {
-      return try exec(path: swiftCompiler.pathString, args: driverKind.usageArgs + parsedOptions.commandLine)
+      return try exec(path: toolchain.getToolPath(.swiftCompiler).pathString, args: driverKind.usageArgs + parsedOptions.commandLine)
     }
 
     if parsedOptions.contains(.help) || parsedOptions.contains(.helpHidden) {
       optionTable.printHelp(driverKind: driverKind, includeHidden: parsedOptions.contains(.helpHidden))
       return
+    }
+
+    if parsedOptions.hasArgument(.version) || parsedOptions.hasArgument(.version_) {
+      // Follow gcc/clang behavior and use stdout for --version and stderr for -v.
+      try printVersion(outputStream: &stdoutStream)
+      return
+    }
+    if parsedOptions.hasArgument(.v) {
+      try printVersion(outputStream: &stderrStream)
     }
 
     // Plan the build.
@@ -632,6 +638,11 @@ extension Driver {
 
     return try exec(path: tool, args: arguments)
   }
+
+  private func printVersion<S: OutputByteStream>(outputStream: inout S) throws {
+    outputStream.write(try Process.checkNonZeroExit(args: toolchain.getToolPath(.swiftCompiler).pathString, "--version"))
+    outputStream.flush()
+  }
 }
 
 extension Diagnostic.Message {
@@ -689,6 +700,9 @@ extension Driver {
 
       case .repl, .deprecatedIntegratedRepl, .lldbRepl:
         return .repl
+
+      case .emitPcm:
+        return .compilePCM
 
       default:
         // Output flag doesn't determine the compiler mode.
@@ -848,6 +862,9 @@ extension Driver {
 
       case .emitPch:
         compilerOutputType = .pch
+
+      case .emitPcm:
+        compilerOutputType = .pcm
 
       case .emitImportedModules:
         compilerOutputType = .importedModules
@@ -1016,8 +1033,7 @@ extension Driver {
     _ parsedOptions: inout ParsedOptions,
     diagnosticEngine: DiagnosticsEngine,
     toolchain: Toolchain,
-    targetTriple: Triple,
-    swiftCompiler: AbsolutePath
+    targetTriple: Triple
   ) throws -> Set<Sanitizer> {
 
     var set = Set<Sanitizer>()
@@ -1042,7 +1058,6 @@ extension Driver {
         for: sanitizer,
         targetTriple: targetTriple,
         parsedOptions: &parsedOptions,
-        swiftCompiler: swiftCompiler,
         isShared: sanitizer != .fuzzer
       )
 
