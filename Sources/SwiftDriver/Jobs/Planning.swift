@@ -165,8 +165,42 @@ extension Driver {
     return jobs
   }
 
+  /// Create a job if needed for simple requests that can be immediately
+  /// forwarded to the frontend.
+  public mutating func immediateForwardingJob() throws -> Job? {
+    if parsedOptions.hasArgument(.printTargetInfo) {
+      var commandLine: [Job.ArgTemplate] = [.flag("-frontend"),
+                                            .flag("-print-target-info")]
+      try commandLine.appendLast(.target, from: &parsedOptions)
+      try commandLine.appendLast(.sdk, from: &parsedOptions)
+      try commandLine.appendLast(.resourceDir, from: &parsedOptions)
+      return Job(kind: .printTargetInfo,
+                 tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
+                 commandLine: commandLine,
+                 inputs: [],
+                 outputs: [],
+                 requiresInPlaceExecution: true)
+    }
+
+    if parsedOptions.hasArgument(.version) || parsedOptions.hasArgument(.version_) {
+      return Job(kind: .versionRequest,
+                 tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
+                 commandLine: [.flag("--version")],
+                 inputs: [],
+                 outputs: [],
+                 requiresInPlaceExecution: true)
+    }
+
+    return nil
+  }
+
   /// Plan a build by producing a set of jobs to complete the build.
   public mutating func planBuild() throws -> [Job] {
+
+    if let job = try immediateForwardingJob() {
+      return [job]
+    }
+
     // Plan the build.
     switch compilerMode {
     case .repl:
@@ -302,12 +336,23 @@ extension Driver {
     // pre-batch-mode 1000. I.e. it's still running 96% fewer
     // subprocesses than before. And significantly: it's doing so while
     // not exceeding the RAM of a typical 2-core laptop.
+
+    // An explanation of why the partition calculation isn't integer
+    // division. Using an example, a module of 26 files exceeds the
+    // limit of 25 and must be compiled in 2 batches. Integer division
+    // yields 26/25 = 1 batch, but a single batch of 26 exceeds the
+    // limit. The calculation must round up, which can be calculated
+    // using: `(x + y - 1) / y`
+    let divideRoundingUp = { num, div in
+        return (num + div - 1) / div
+    }
+
     let defaultSizeLimit = 25
     let numInputFiles = swiftInputFiles.count
     let sizeLimit = info.sizeLimit ?? defaultSizeLimit
 
     let numTasks = numParallelJobs ?? 1
-    return max(numTasks, numInputFiles / sizeLimit)
+    return max(numTasks, divideRoundingUp(numInputFiles, sizeLimit))
   }
 
   /// Describes the partitions used when batching.
