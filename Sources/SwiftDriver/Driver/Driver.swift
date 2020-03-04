@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 import TSCBasic
 import TSCUtility
+import Foundation
 
 /// How should the Swift module output be handled?
 public enum ModuleOutput: Equatable {
@@ -40,13 +41,30 @@ public enum ModuleOutput: Equatable {
 
 /// The Swift driver.
 public struct Driver {
-  enum Error: Swift.Error {
+  public enum Error: Swift.Error, DiagnosticData {
     case invalidDriverName(String)
     case invalidInput(String)
-    case subcommandPassedToDriver
+    case noJobsPassedToDriverFromEmptyInputFileList
     case relativeFrontendPath(String)
+    case subcommandPassedToDriver
+
+    public var description: String {
+      switch self {
+      case .invalidDriverName(let driverName):
+        return "invalid driver name: \(driverName)"
+      case .invalidInput(let input):
+        return "invalid input: \(input)"
+      case .noJobsPassedToDriverFromEmptyInputFileList:
+        return "no input files"
+      case .relativeFrontendPath(let path):
+        // TODO: where is this error thrown
+        return "relative frontend path: \(path)"
+      case .subcommandPassedToDriver:
+        return "subcommand passed to driver"
+      }
+    }
   }
-  
+
   /// The set of environment variables that are visible to the driver and
   /// processes it launches. This is a hook for testing; in actual use
   /// it should be identical to the real environment.
@@ -78,6 +96,9 @@ public struct Driver {
 
   /// The set of input files
   public let inputFiles: [TypedVirtualPath]
+
+  /// The last time each input file was modified, recorded at the start of the build.
+  public let recordedInputModificationDates: [TypedVirtualPath: Date]
 
   /// The mapping from input files to output files for each kind.
   internal let outputFileMap: OutputFileMap?
@@ -246,14 +267,28 @@ public struct Driver {
     // Classify and collect all of the input files.
     let inputFiles = try Self.collectInputFiles(&self.parsedOptions)
     self.inputFiles = inputFiles
+    self.recordedInputModificationDates = .init(uniqueKeysWithValues:
+      Set(inputFiles).compactMap {
+        if case .absolute(let absolutePath) = $0.file,
+          let modTime = try? localFileSystem.getFileInfo(absolutePath).modTime {
+          return ($0, modTime)
+        }
+        return nil
+    })
 
+    let outputFileMap: OutputFileMap?
     // Initialize an empty output file map, which will be populated when we start creating jobs.
     if let outputFileMapArg = parsedOptions.getLastArgument(.outputFileMap)?.asSingle {
       let path = try AbsolutePath(validating: outputFileMapArg)
-      self.outputFileMap = try .load(file: path, diagnosticEngine: diagnosticEngine)
+      outputFileMap = try .load(file: path, diagnosticEngine: diagnosticEngine)
+    } else {
+      outputFileMap = nil
     }
-    else {
-      self.outputFileMap = nil
+
+    if let workingDirectory = self.workingDirectory {
+      self.outputFileMap = outputFileMap?.resolveRelativePaths(relativeTo: workingDirectory)
+    } else {
+      self.outputFileMap = outputFileMap
     }
 
     // Determine the compilation mode.
@@ -291,6 +326,7 @@ public struct Driver {
 
     self.importedObjCHeader = try Self.computeImportedObjCHeader(&parsedOptions, compilerMode: compilerMode, diagnosticEngine: diagnosticEngine)
     self.bridgingPrecompiledHeader = try Self.computeBridgingPrecompiledHeader(&parsedOptions,
+                                                                               compilerMode: compilerMode,
                                                                                importedObjCHeader: importedObjCHeader,
                                                                                outputFileMap: outputFileMap)
 
@@ -423,24 +459,25 @@ extension Driver {
   /// This method supports response files with:
   /// 1. Double slash comments at the beginning of a line.
   /// 2. Backslash escaping.
-  /// 3. Space character (U+0020 SPACE).
+  /// 3. Shell Quoting
   ///
-  /// - Returns: One line String ready to be used in the shell, if any.
+  /// - Returns: An array of 0 or more command line arguments
   ///
   /// - Complexity: O(*n*), where *n* is the length of the line.
-  private static func tokenizeResponseFileLine<S: StringProtocol>(_ line: S) -> String? {
-    if line.isEmpty { return nil }
-    
+  private static func tokenizeResponseFileLine<S: StringProtocol>(_ line: S) -> [String] {
     // Support double dash comments only if they start at the beginning of a line.
-    if line.hasPrefix("//") { return nil }
-    
-    var result: String = ""
-    /// Indicates if we just parsed an escaping backslash.
-    var isEscaping = false
-    
-    for char in line {
-      if char.isNewline { return result }
+    if line.hasPrefix("//") { return [] }
 
+    var tokens: [String] = []
+    var token: String = ""
+    // Conservatively assume ~1 token per line.
+    token.reserveCapacity(line.count)
+    // Indicates if we just parsed an escaping backslash.
+    var isEscaping = false
+    // Indicates if we are currently parsing quoted text.
+    var quoted = false
+
+    for char in line {
       // Backslash escapes to the next character.
       if char == #"\"#, !isEscaping {
         isEscaping = true
@@ -448,25 +485,37 @@ extension Driver {
       } else if isEscaping {
         // Disable escaping and keep parsing.
         isEscaping = false
+      } else if char.isShellQuote {
+        // If an unescaped shell quote appears, begin or end quoting.
+        quoted.toggle()
+        continue
+      } else if char.isWhitespace && !quoted {
+        // This is unquoted, unescaped whitespace, start a new token.
+        tokens.append(token)
+        token = ""
+        continue
       }
-      
-      // Ignore spacing characters, except by the space character.
-      if char.isWhitespace && char != " " { continue }
-      
-      result.append(char)
+
+      token.append(char)
     }
-    return result.isEmpty ? nil : result
+    // Add the final token
+    tokens.append(token)
+
+    // Filter any empty tokens that might be parsed if there's excessive whitespace.
+    return tokens.filter { !$0.isEmpty }
   }
 
   /// Tokenize each line of the response file, omitting empty lines.
   ///
   /// - Parameter content: response file's content to be tokenized.
   private static func tokenizeResponseFile(_ content: String) -> [String] {
-    return content
-      .split(separator: "\n")
-      .compactMap { tokenizeResponseFileLine($0) }
+    #if !os(macOS) && !os(Linux)
+      #warning("Response file tokenization unimplemented for platform; behavior may be incorrect")
+    #endif
+    return content.split { $0 == "\n" || $0 == "\r\n" }
+           .flatMap { tokenizeResponseFileLine($0) }
   }
-  
+
   /// Recursively expands the response files.
   /// - Parameter visitedResponseFiles: Set containing visited response files to detect recursive parsing.
   private static func expandResponseFiles(
@@ -572,12 +621,19 @@ extension Driver {
       try printVersion(outputStream: &stderrStream)
     }
 
-    if jobs.isEmpty { return }
+    guard !jobs.isEmpty else {
+      guard !inputFiles.isEmpty else {
+        throw Error.noJobsPassedToDriverFromEmptyInputFileList
+      }
+      return
+    }
+
+    let forceResponseFiles = parsedOptions.contains(.driverForceResponseFiles)
 
     // If we're only supposed to print the jobs, do so now.
     if parsedOptions.contains(.driverPrintJobs) {
       for job in jobs {
-        print(job)
+        try Self.printJob(job, resolver: resolver, forceResponseFiles: forceResponseFiles)
       }
       return
     }
@@ -589,9 +645,9 @@ extension Driver {
       return
     }
 
-    if jobs.contains(where: { $0.requiresInPlaceExecution }) {
+    if jobs.contains(where: { $0.requiresInPlaceExecution }) || jobs.count == 1 {
       assert(jobs.count == 1, "Cannot execute in place for multi-job build plans")
-      return try executeJobInPlace(jobs[0], resolver: resolver)
+      return try executeJobInPlace(jobs[0], resolver: resolver, forceResponseFiles: forceResponseFiles)
     }
 
     // Create and use the tool execution delegate if one is not provided explicitly.
@@ -602,7 +658,9 @@ extension Driver {
         jobs: jobs, resolver: resolver,
         executorDelegate: executorDelegate,
         numParallelJobs: numParallelJobs,
-        processSet: processSet
+        processSet: processSet,
+        forceResponseFiles: forceResponseFiles,
+        recordedInputModificationDates: recordedInputModificationDates
     )
     try jobExecutor.execute(env: env)
   }
@@ -621,16 +679,34 @@ extension Driver {
   }
 
   /// Execute a single job in-place.
-  private func executeJobInPlace(_ job: Job, resolver: ArgsResolver) throws {
-    let tool = try resolver.resolve(.path(job.tool))
-    let commandLine = try job.commandLine.map{ try resolver.resolve($0) }
-    let arguments = [tool] + commandLine
+  private func executeJobInPlace(_ job: Job, resolver: ArgsResolver, forceResponseFiles: Bool) throws {
+    let arguments: [String] = try resolver.resolveArgumentList(for: job, forceResponseFiles: forceResponseFiles)
 
     for (envVar, value) in job.extraEnvironment {
       try ProcessEnv.setVar(envVar, value: value)
     }
 
-    return try exec(path: tool, args: arguments)
+    try job.verifyInputsNotModified(since: self.recordedInputModificationDates)
+
+    return try exec(path: arguments[0], args: arguments)
+  }
+
+  public static func printJob(_ job: Job, resolver: ArgsResolver, forceResponseFiles: Bool) throws {
+    let (args, usedResponseFile) = try resolver.resolveArgumentList(for: job, forceResponseFiles: forceResponseFiles)
+    var result = args.joined(separator: " ")
+
+    if usedResponseFile {
+      // Print the response file arguments as a comment.
+      result += " # \(job.commandLine.joinedArguments)"
+    }
+
+    if !job.extraEnvironment.isEmpty {
+      result += " #"
+      for (envVar, val) in job.extraEnvironment {
+        result += " \(envVar)=\(val)"
+      }
+    }
+    print(result)
   }
 
   private func printVersion<S: OutputByteStream>(outputStream: inout S) throws {
@@ -689,7 +765,7 @@ extension Driver {
     // Some output flags affect the compiler mode.
     if let outputOption = parsedOptions.getLast(in: .modes) {
       switch outputOption.option {
-      case .emitPch, .emitImportedModules, .indexFile:
+      case .emitPch, .emitImportedModules:
         return .singleCompile
 
       case .repl, .deprecatedIntegratedRepl, .lldbRepl:
@@ -708,13 +784,13 @@ extension Driver {
       return parsedOptions.hasAnyInput ? .immediate : .repl
     }
 
-    let requiresSingleCompile = parsedOptions.hasArgument(.wholeModuleOptimization, .indexFile)
-
+    let useWMO = parsedOptions.hasFlag(positive: .wholeModuleOptimization, negative: .noWholeModuleOptimization, default: false)
+    let hasIndexFile = parsedOptions.hasArgument(.indexFile)
     let wantBatchMode = parsedOptions.hasFlag(positive: .enableBatchMode, negative: .disableBatchMode, default: false)
 
-    if requiresSingleCompile {
+    if useWMO || hasIndexFile {
       if wantBatchMode {
-        let disablingOption: Option = parsedOptions.hasArgument(.wholeModuleOptimization) ? .wholeModuleOptimization : .indexFile
+        let disablingOption: Option = useWMO ? .wholeModuleOptimization : .indexFile
         diagnosticsEngine.emit(.warn_ignoring_batch_mode(disablingOption))
       }
 
@@ -1115,12 +1191,12 @@ extension Driver {
   private static func baseNameWithoutExtension(_ path: String, hasExtension: inout Bool) -> String {
     if let absolute = try? AbsolutePath(validating: path) {
       hasExtension = absolute.extension != nil
-      return absolute.basenameWithoutAllExts
+      return absolute.basenameWithoutExt
     }
 
     if let relative = try? RelativePath(validating: path) {
       hasExtension = relative.extension != nil
-      return relative.basenameWithoutAllExts
+      return relative.basenameWithoutExt
     }
 
     hasExtension = false
@@ -1218,7 +1294,7 @@ extension Driver {
       // This value will fail the isSwiftIdentifier test below.
       moduleName = ""
     }
-    
+
     func fallbackOrDiagnose(_ error: Diagnostic.Message) {
       // FIXME: Current driver notes that this is a "fallback module name".
       if compilerOutputType == nil || maybeBuildingExecutable(&parsedOptions, linkerOutputType: linkerOutputType) {
@@ -1288,8 +1364,8 @@ extension Driver {
     } else if let SDKROOT = env["SDKROOT"] {
       sdkPath = SDKROOT
     } else if compilerMode == .immediate || compilerMode == .repl {
-      // FIXME: ... is triple macOS ...
-      if true {
+      let triple = try? toolchain.hostTargetTriple()
+      if triple?.isMacOSX == true {
         // In immediate modes, use the SDK provided by xcrun.
         // This will prefer the SDK alongside the Swift found by "xcrun swift".
         // We don't do this in compilation modes because defaulting to the
@@ -1297,7 +1373,7 @@ extension Driver {
         sdkPath = try? toolchain.defaultSDKPath()?.pathString
       }
     }
-    
+
     // An empty string explicitly clears the SDK.
     if sdkPath == "" {
       sdkPath = nil
@@ -1352,9 +1428,11 @@ extension Driver {
 
   /// Compute the path of the generated bridging PCH for the Objective-C header.
   static func computeBridgingPrecompiledHeader(_ parsedOptions: inout ParsedOptions,
+                                               compilerMode: CompilerMode,
                                                importedObjCHeader: VirtualPath?,
                                                outputFileMap: OutputFileMap?) throws -> VirtualPath? {
-    guard let input = importedObjCHeader,
+    guard compilerMode.supportsBridgingPCH,
+      let input = importedObjCHeader,
       parsedOptions.hasFlag(positive: .enableBridgingPch, negative: .disableBridgingPch, default: true) else {
         return nil
     }
@@ -1410,7 +1488,7 @@ extension Driver {
   #else
   static let defaultToolchainType: Toolchain.Type = GenericUnixToolchain.self
   #endif
-  
+
   static func computeToolchain(
     _ explicitTarget: Triple?,
     diagnosticsEngine: DiagnosticsEngine,

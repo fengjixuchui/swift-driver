@@ -428,34 +428,34 @@ final class TripleTests: XCTestCase {
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mips64r6el")
     XCTAssertEqual(T.arch, Triple.Arch.mips64el)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsisa64r6el")
     XCTAssertEqual(T.arch, Triple.Arch.mips64el)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("mipsisa64r6-unknown-linux-gnuabi64")
     XCTAssertEqual(T.arch, Triple.Arch.mips64)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mips64r6")
     XCTAssertEqual(T.arch, Triple.Arch.mips64)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsisa64r6")
     XCTAssertEqual(T.arch, Triple.Arch.mips64)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabi64)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("mips64el-unknown-linux-gnuabin32")
     XCTAssertEqual(T.arch, Triple.Arch.mips64el)
@@ -486,24 +486,24 @@ final class TripleTests: XCTestCase {
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabin32)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsn32r6el")
     XCTAssertEqual(T.arch, Triple.Arch.mips64el)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabin32)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("mipsisa64r6-unknown-linux-gnuabin32")
     XCTAssertEqual(T.arch, Triple.Arch.mips64)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabin32)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsn32r6")
     XCTAssertEqual(T.arch, Triple.Arch.mips64)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnuabin32)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("mipsel-unknown-linux-gnu")
     XCTAssertEqual(T.arch, Triple.Arch.mipsel)
@@ -534,33 +534,33 @@ final class TripleTests: XCTestCase {
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnu)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsr6el")
     XCTAssertEqual(T.arch, Triple.Arch.mipsel)
     XCTAssertEqual(T.vendor, nil)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsisa32r6el")
     XCTAssertEqual(T.arch, Triple.Arch.mipsel)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnu)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("mipsisa32r6-unknown-linux-gnu")
     XCTAssertEqual(T.arch, Triple.Arch.mips)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.os, Triple.OS.linux)
     XCTAssertEqual(T.environment, Triple.Environment.gnu)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsr6")
     XCTAssertEqual(T.arch, Triple.Arch.mips)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnu)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
     T = Triple("mipsisa32r6")
     XCTAssertEqual(T.arch, Triple.Arch.mips)
     XCTAssertEqual(T.vendor, nil)
     XCTAssertEqual(T.environment, Triple.Environment.gnu)
-//    XCTAssertEqual(T.subArch, Triple.SubArch.mipsSubArch_r6)
+    XCTAssertEqual(T.subArch, Triple.SubArch.mips(.r6))
 
     T = Triple("arm-oe-linux-gnueabi")
     XCTAssertEqual(T.arch, Triple.Arch.arm)
@@ -580,6 +580,32 @@ final class TripleTests: XCTestCase {
     XCTAssertEqual(T.os, Triple.OS.ios)
     XCTAssertEqual(T.environment, nil)
     XCTAssertEqual(T.arch?.is32Bit, true)
+
+    T = Triple("armv7s-apple-ios")
+    XCTAssertEqual(T.arch, Triple.Arch.arm)
+    XCTAssertEqual(T.os, Triple.OS.ios)
+    XCTAssertEqual(T.environment, nil)
+    XCTAssertEqual(T.arch?.is32Bit, true)
+    XCTAssertEqual(T.subArch, Triple.SubArch.arm(.v7s))
+
+    T = Triple("xscale-none-linux-gnueabi")
+    XCTAssertEqual(T.arch, Triple.Arch.arm)
+    XCTAssertEqual(T.os, Triple.OS.linux)
+    XCTAssertEqual(T.vendor, nil)
+    XCTAssertEqual(T.environment, Triple.Environment.gnueabi)
+    XCTAssertEqual(T.subArch, Triple.SubArch.arm(.v5e))
+
+    T = Triple("thumbv7-pc-linux-gnu")
+    XCTAssertEqual(T.arch, Triple.Arch.thumb)
+    XCTAssertEqual(T.vendor, Triple.Vendor.pc)
+    XCTAssertEqual(T.os, Triple.OS.linux)
+    XCTAssertEqual(T.environment, Triple.Environment.gnu)
+
+    T = Triple("thumbv3-pc-linux-gnu")
+    XCTAssertEqual(T.arch, nil)
+    XCTAssertEqual(T.vendor, Triple.Vendor.pc)
+    XCTAssertEqual(T.os, Triple.OS.linux)
+    XCTAssertEqual(T.environment, Triple.Environment.gnu)
 
     T = Triple("huh")
     XCTAssertEqual(T.arch, nil)
@@ -960,7 +986,7 @@ final class TripleTests: XCTestCase {
 //    T.setObjectFormat(.XCOFF)
 //    XCTAssertEqual(.XCOFF, T.objectFormat)
   }
-  
+
   static let jetPacks = Triple.FeatureAvailability(
     macOS: .init(10, 50, 0),
     iOS: .init(50, 0, 0),
@@ -968,7 +994,7 @@ final class TripleTests: XCTestCase {
     watchOS: .init(50, 0, 0),
     nonDarwin: true
   )
-  
+
   func assertDarwinPlatformCorrect(
     _ triple: Triple,
     case match: (DarwinPlatform) -> DarwinPlatform.Environment?,
@@ -983,16 +1009,16 @@ final class TripleTests: XCTestCase {
       XCTFail("Not a Darwin platform: \(triple)", file: file, line: line)
       return
     }
-    
+
     guard let matchedEnvironment = match(platform) else {
       XCTFail("Unexpected case: \(platform) from \(triple)",
         file: file, line: line)
       return
     }
-    
+
     XCTAssertEqual(matchedEnvironment, environment,
                    "environment == .simulator", file: file, line: line)
-    
+
     if let macOSVersion = macOSVersion {
       XCTAssertEqual(triple.version(for: .macOS), macOSVersion,
                      "macOS version", file: file, line: line)
@@ -1013,7 +1039,7 @@ final class TripleTests: XCTestCase {
       XCTAssertEqual(triple.version(for: .watchOS(.simulator)), watchOSVersion,
                      "watchOS simulator version", file: file, line: line)
     }
-    
+
     XCTAssertEqual(triple.supports(Self.jetPacks), shouldHaveJetPacks,
                    "FeatureAvailability version check", file: file, line: line)
   }
@@ -1022,7 +1048,7 @@ final class TripleTests: XCTestCase {
     let nonDarwin = Triple("x86_64-unknown-linux")
     XCTAssertNil(nonDarwin.darwinPlatform)
     XCTAssertTrue(nonDarwin.supports(Self.jetPacks))
-    
+
     func macOS(_ platform: DarwinPlatform) -> DarwinPlatform.Environment? {
       if case .macOS = platform { return .device } else { return nil }
     }
@@ -1095,7 +1121,7 @@ final class TripleTests: XCTestCase {
                                 iOSVersion: .init(60, 0, 0),
                                 watchOSVersion: nil,
                                 shouldHaveJetPacks: true)
-    
+
     let tvOS1 = Triple("x86_64-apple-tvos13.0-simulator")
     let tvOS2 = Triple("powerpc-apple-tvos50.0") // FIXME: should test with ARM
     let tvOS3 = Triple("x86_64-apple-tvos60.0")
@@ -1121,7 +1147,7 @@ final class TripleTests: XCTestCase {
                                 iOSVersion: .init(60, 0, 0),
                                 watchOSVersion: nil,
                                 shouldHaveJetPacks: true)
-    
+
     let watchOS1 = Triple("x86_64-apple-watchos6.0-simulator")
     let watchOS2 = Triple("powerpc-apple-watchos50.0") // FIXME: should test with ARM
     let watchOS3 = Triple("x86_64-apple-watchos60.0")

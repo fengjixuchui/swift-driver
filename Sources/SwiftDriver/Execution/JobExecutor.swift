@@ -32,6 +32,19 @@ public struct ArgsResolver {
     }
   }
 
+  public func resolveArgumentList(for job: Job, forceResponseFiles: Bool) throws -> [String] {
+    let (arguments, _) = try resolveArgumentList(for: job, forceResponseFiles: forceResponseFiles)
+    return arguments
+  }
+
+  public func resolveArgumentList(for job: Job, forceResponseFiles: Bool) throws -> ([String], usingResponseFile: Bool) {
+    let tool = try resolve(.path(job.tool))
+    var arguments = [tool] + (try job.commandLine.map { try resolve($0) })
+    let usingResponseFile = try createResponseFileIfNeeded(for: job, resolvedArguments: &arguments,
+                                                           forceResponseFiles: forceResponseFiles)
+    return (arguments, usingResponseFile)
+  }
+
   /// Resolve the given argument.
   public func resolve(_ arg: Job.ArgTemplate) throws -> String {
     switch arg {
@@ -53,6 +66,22 @@ public struct ArgsResolver {
       // Otherwise, return the path.
       return path.name
     }
+  }
+
+  private func createResponseFileIfNeeded(for job: Job, resolvedArguments: inout [String], forceResponseFiles: Bool) throws -> Bool {
+    if forceResponseFiles ||
+      (job.supportsResponseFiles && !commandLineFitsWithinSystemLimits(path: resolvedArguments[0], args: resolvedArguments)) {
+      assert(!forceResponseFiles || job.supportsResponseFiles,
+             "Platform does not support response files for job: \(job)")
+      // Match the integrated driver's behavior, which uses response file names of the form "arguments-[0-9a-zA-Z].resp".
+      let responseFilePath = temporaryDirectory.appending(component: "arguments-\(abs(job.hashValue)).resp")
+      try localFileSystem.writeFileContents(responseFilePath) {
+        $0 <<< resolvedArguments[1...].map{ $0.spm_shellEscaped() }.joined(separator: "\n")
+      }
+      resolvedArguments = [resolvedArguments[0], "@\(responseFilePath.pathString)"]
+      return true
+    }
+    return false
   }
 
   /// Remove the temporary directory from disk.
@@ -90,7 +119,7 @@ public final class JobExecutor {
 
     /// The resolver for argument template.
     let argsResolver: ArgsResolver
-    
+
     /// The environment variables.
     let env: [String: String]
 
@@ -106,13 +135,21 @@ public final class JobExecutor {
     /// The process set to use when launching new processes.
     let processSet: ProcessSet?
 
+    /// If true, always use response files to pass command line arguments.
+    let forceResponseFiles: Bool
+
+    /// The last time each input file was modified, recorded at the start of the build.
+    public let recordedInputModificationDates: [TypedVirtualPath: Date]
+
     init(
       argsResolver: ArgsResolver,
       env: [String: String],
       producerMap: [VirtualPath: Job],
       executorDelegate: JobExecutorDelegate,
       jobQueue: OperationQueue,
-      processSet: ProcessSet?
+      processSet: ProcessSet?,
+      forceResponseFiles: Bool,
+      recordedInputModificationDates: [TypedVirtualPath: Date]
     ) {
       self.producerMap = producerMap
       self.argsResolver = argsResolver
@@ -120,6 +157,8 @@ public final class JobExecutor {
       self.executorDelegate = executorDelegate
       self.jobQueue = jobQueue
       self.processSet = processSet
+      self.forceResponseFiles = forceResponseFiles
+      self.recordedInputModificationDates = recordedInputModificationDates
     }
   }
 
@@ -138,18 +177,28 @@ public final class JobExecutor {
   /// The process set to use when launching new processes.
   let processSet: ProcessSet?
 
+  /// If true, always use response files to pass command line arguments.
+  let forceResponseFiles: Bool
+
+  /// The last time each input file was modified, recorded at the start of the build.
+  public let recordedInputModificationDates: [TypedVirtualPath: Date]
+
   public init(
     jobs: [Job],
     resolver: ArgsResolver,
     executorDelegate: JobExecutorDelegate,
     numParallelJobs: Int? = nil,
-    processSet: ProcessSet? = nil
+    processSet: ProcessSet? = nil,
+    forceResponseFiles: Bool = false,
+    recordedInputModificationDates: [TypedVirtualPath: Date] = [:]
   ) {
     self.jobs = jobs
     self.argsResolver = resolver
     self.executorDelegate = executorDelegate
     self.numParallelJobs = numParallelJobs ?? 1
     self.processSet = processSet
+    self.forceResponseFiles = forceResponseFiles
+    self.recordedInputModificationDates = recordedInputModificationDates
   }
 
   /// Execute all jobs.
@@ -187,7 +236,9 @@ public final class JobExecutor {
       producerMap: producerMap,
       executorDelegate: executorDelegate,
       jobQueue: jobQueue,
-      processSet: processSet
+      processSet: processSet,
+      forceResponseFiles: forceResponseFiles,
+      recordedInputModificationDates: recordedInputModificationDates
     )
   }
 }
@@ -339,9 +390,10 @@ class ExecuteJobRule: LLBuildRule {
     let value: DriverBuildValue
     var pid = 0
     do {
-      let tool = try resolver.resolve(.path(job.tool))
-      let commandLine = try job.commandLine.map{ try resolver.resolve($0) }
-      let arguments = [tool] + commandLine
+      let arguments: [String] = try resolver.resolveArgumentList(for: job,
+                                                                 forceResponseFiles: context.forceResponseFiles)
+
+      try job.verifyInputsNotModified(since: context.recordedInputModificationDates)
 
       let process = try context.executorDelegate.launchProcess(
         for: job, arguments: arguments, env: env

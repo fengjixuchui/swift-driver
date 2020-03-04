@@ -10,9 +10,10 @@
 //
 //===----------------------------------------------------------------------===//
 import TSCBasic
+import Foundation
 
 /// A job represents an individual subprocess that should be invoked during compilation.
-public struct Job: Codable, Equatable {
+public struct Job: Codable, Equatable, Hashable {
   public enum Kind: String, Codable {
     case compile
     case mergeModule = "merge-module"
@@ -31,7 +32,7 @@ public struct Job: Codable, Equatable {
     case versionRequest = "version-request"
   }
 
-  public enum ArgTemplate: Equatable {
+  public enum ArgTemplate: Equatable, Hashable {
     /// Represents a command-line flag that is substitued as-is.
     case flag(String)
 
@@ -45,6 +46,9 @@ public struct Job: Codable, Equatable {
   /// The command-line arguments of the job.
   public var commandLine: [ArgTemplate]
 
+  /// Whether or not the job supports using response files to pass command line arguments.
+  public var supportsResponseFiles: Bool
+
   /// The list of inputs to use for displaying purposes.
   public var displayInputs: [TypedVirtualPath]
 
@@ -53,7 +57,7 @@ public struct Job: Codable, Equatable {
 
   /// The outputs produced by the job.
   public var outputs: [TypedVirtualPath]
-  
+
   /// Any extra environment variables which should be set while running the job.
   public var extraEnvironment: [String: String]
 
@@ -71,7 +75,8 @@ public struct Job: Codable, Equatable {
     inputs: [TypedVirtualPath],
     outputs: [TypedVirtualPath],
     extraEnvironment: [String: String] = [:],
-    requiresInPlaceExecution: Bool = false
+    requiresInPlaceExecution: Bool = false,
+    supportsResponseFiles: Bool = false
   ) {
     self.kind = kind
     self.tool = tool
@@ -81,21 +86,30 @@ public struct Job: Codable, Equatable {
     self.outputs = outputs
     self.extraEnvironment = extraEnvironment
     self.requiresInPlaceExecution = requiresInPlaceExecution
+    self.supportsResponseFiles = supportsResponseFiles
   }
 }
 
-extension Job: CustomStringConvertible {
-  public var description: String {
-    var result: String = "\(tool.name) \(commandLine.joinedArguments)"
+extension Job {
+  public enum InputError: Error, Equatable, DiagnosticData {
+    case inputUnexpectedlyModified(TypedVirtualPath)
 
-    if !self.extraEnvironment.isEmpty {
-      result += " #"
-      for (envVar, val) in extraEnvironment {
-        result += " \(envVar)=\(val)"
+    public var description: String {
+      switch self {
+      case .inputUnexpectedlyModified(let input):
+        return "input file '\(input.file.name)' was modified during the build"
       }
     }
+  }
 
-    return result
+  public func verifyInputsNotModified(since recordedInputModificationDates: [TypedVirtualPath: Date]) throws {
+    for input in inputs {
+      if case .absolute(let absolutePath) = input.file,
+        let recordedModificationTime = recordedInputModificationDates[input],
+        try localFileSystem.getFileInfo(absolutePath).modTime != recordedModificationTime {
+        throw InputError.inputUnexpectedlyModified(input)
+      }
+    }
   }
 }
 
