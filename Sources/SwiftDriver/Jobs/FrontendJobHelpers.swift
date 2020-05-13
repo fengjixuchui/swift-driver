@@ -54,6 +54,11 @@ extension Driver {
       }
     }
 
+    if let variant = parsedOptions.getLastArgument(.targetVariant)?.asSingle {
+      commandLine.appendFlag(.targetVariant)
+      commandLine.appendFlag(Triple(variant, normalizing: true).triple)
+    }
+
     // Enable address top-byte ignored in the ARM64 backend.
     if (targetTriple.arch == .aarch64) {
       commandLine.appendFlag(.Xllvm)
@@ -113,7 +118,7 @@ extension Driver {
     try commandLine.appendLast(.profileGenerate, from: &parsedOptions)
     try commandLine.appendLast(.profileUse, from: &parsedOptions)
     try commandLine.appendLast(.profileCoverageMapping, from: &parsedOptions)
-    try commandLine.appendLast(.warningsAsErrors, from: &parsedOptions)
+    try commandLine.appendLast(.warningsAsErrors, .noWarningsAsErrors, from: &parsedOptions)
     try commandLine.appendLast(.sanitizeCoverageEQ, from: &parsedOptions)
     try commandLine.appendLast(.static, from: &parsedOptions)
     try commandLine.appendLast(.swiftVersion, from: &parsedOptions)
@@ -136,6 +141,7 @@ extension Driver {
     try commandLine.appendLast(.enableFineGrainedDependencies, from: &parsedOptions)
     try commandLine.appendLast(.fineGrainedDependencyIncludeIntrafile, from: &parsedOptions)
     try commandLine.appendLast(.enableExperimentalConcisePoundFile, from: &parsedOptions)
+    try commandLine.appendLast(.printEducationalNotes, from: &parsedOptions)
     try commandLine.appendAll(.D, from: &parsedOptions)
     try commandLine.appendAll(.sanitizeEQ, from: &parsedOptions)
     try commandLine.appendAllArguments(.debugPrefixMap, from: &parsedOptions)
@@ -191,7 +197,7 @@ extension Driver {
       }
     }
 
-    // Repl Jobs may include -module-name depending on the selected REPL (LLDB or integrated).
+    // Repl Jobs shouldn't include -module-name.
     if compilerMode != .repl {
       commandLine.appendFlags("-module-name", moduleName)
     }
