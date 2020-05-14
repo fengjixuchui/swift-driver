@@ -65,12 +65,14 @@ extension Driver {
     let isTopLevel: Bool
 
     switch compilerOutputType {
-    case .assembly, .sil, .raw_sil, .llvmIR, .ast:
+    case .assembly, .sil, .raw_sil, .llvmIR, .ast, .jsonDependencies:
       isTopLevel = true
     case .object:
       isTopLevel = (linkerOutputType == nil)
+    case .swiftModule:
+      isTopLevel = compilerMode.isSingleCompilation && moduleOutput?.isTopLevel ?? false
     case .swift, .sib, .image, .dSYM, .dependencies, .autolink,
-         .swiftModule, .swiftDocumentation, .swiftInterface,
+         .swiftDocumentation, .swiftInterface,
          .swiftSourceInfoFile, .raw_sib, .llvmBitcode, .diagnostics,
          .objcHeader, .swiftDeps, .remap, .importedModules, .tbd, .moduleTrace,
          .indexData, .optimizationRecord, .pcm, .pch, nil:
@@ -86,6 +88,8 @@ extension Driver {
     assert(!usesPrimaryFileInputs || !primaryInputs.isEmpty)
     let primaryInputFiles = usesPrimaryFileInputs ? Set(primaryInputs) : Set()
 
+    let isMultithreaded = numThreads > 0
+
     // Add each of the input files.
     // FIXME: Use/create input file lists and primary input file lists.
     var primaryOutputs: [TypedVirtualPath] = []
@@ -100,8 +104,8 @@ extension Driver {
 
       // If there is a primary output or we are doing multithreaded compiles,
       // add an output for the input.
-      if isPrimary || numThreads > 0,
-          let compilerOutputType = compilerOutputType {
+      if let compilerOutputType = compilerOutputType,
+        isPrimary || (!usesPrimaryFileInputs && isMultithreaded && compilerOutputType.isAfterLLVM) {
         primaryOutputs.append(computePrimaryOutput(for: input,
                                                    outputType: compilerOutputType,
                                                    isTopLevel: isTopLevel))
@@ -109,8 +113,8 @@ extension Driver {
     }
 
     // When not using primary file inputs or multithreading, add a single output.
-    if !usesPrimaryFileInputs && numThreads == 0,
-        let outputType = compilerOutputType {
+    if let outputType = compilerOutputType,
+      !usesPrimaryFileInputs && !(isMultithreaded && outputType.isAfterLLVM) {
       primaryOutputs.append(computePrimaryOutput(
         for: TypedVirtualPath(file: try! VirtualPath(path: ""),
                               type: swiftInputFiles[0].type),
@@ -238,6 +242,8 @@ extension FileType {
       return .typecheck
     case .remap:
       return .updateCode
+    case .jsonDependencies:
+      return .scanDependencies
 
     case .swift, .dSYM, .autolink, .dependencies, .swiftDocumentation, .pcm,
          .diagnostics, .objcHeader, .image, .swiftDeps, .moduleTrace, .tbd,

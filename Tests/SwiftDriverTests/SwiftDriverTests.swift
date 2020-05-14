@@ -466,7 +466,7 @@ final class SwiftDriverTests: XCTestCase {
     try withTemporaryFile { file in
       try assertNoDiagnostics { diags in
         try localFileSystem.writeFileContents(file.path) { $0 <<< contents }
-        let outputFileMap = try OutputFileMap.load(file: .absolute(file.path), diagnosticEngine: diags)
+        let outputFileMap = try OutputFileMap.load(fileSystem: localFileSystem, file: .absolute(file.path), diagnosticEngine: diags)
 
         let object = try outputFileMap.getOutput(inputFile: .init(path: "/tmp/foo/Sources/foo/foo.swift"), outputType: .object)
         XCTAssertEqual(object.name, "/tmp/foo/.build/x86_64-apple-macosx/debug/foo.build/foo.swift.o")
@@ -499,10 +499,10 @@ final class SwiftDriverTests: XCTestCase {
     let sampleOutputFileMap = OutputFileMap(entries: pathyEntries)
 
     try withTemporaryFile { file in
-      try sampleOutputFileMap.store(file: file.path, diagnosticEngine: DiagnosticsEngine())
+      try sampleOutputFileMap.store(fileSystem: localFileSystem, file: file.path, diagnosticEngine: DiagnosticsEngine())
       let contentsForDebugging = try localFileSystem.readFileContents(file.path).cString
       _ = contentsForDebugging
-      let recoveredOutputFileMap = try OutputFileMap.load(file: .absolute(file.path), diagnosticEngine: DiagnosticsEngine())
+      let recoveredOutputFileMap = try OutputFileMap.load(fileSystem: localFileSystem, file: .absolute(file.path), diagnosticEngine: DiagnosticsEngine())
       XCTAssertEqual(sampleOutputFileMap, recoveredOutputFileMap)
     }
   }
@@ -588,7 +588,7 @@ final class SwiftDriverTests: XCTestCase {
       try localFileSystem.writeFileContents(barPath) {
         $0 <<< "from\nbar\n@\(fooPath.pathString)"
       }
-      let args = try Driver.expandResponseFiles(["swift", "compiler", "-Xlinker", "@loader_path", "@" + fooPath.pathString, "something"], diagnosticsEngine: diags)
+      let args = try Driver.expandResponseFiles(["swift", "compiler", "-Xlinker", "@loader_path", "@" + fooPath.pathString, "something"], fileSystem: localFileSystem, diagnosticsEngine: diags)
       XCTAssertEqual(args, ["swift", "compiler", "-Xlinker", "@loader_path", "hello", "bye", "bye to you", "from", "bar", "something"])
       XCTAssertEqual(diags.diagnostics.count, 1)
       XCTAssert(diags.diagnostics.first!.description.contains("is recursively expanded"))
@@ -633,9 +633,9 @@ final class SwiftDriverTests: XCTestCase {
       try localFileSystem.writeFileContents(escapingPath) {
         $0 <<< "swift\n--driver-mode=swiftc\n-v\r\n//comment\n\"the end\""
       }
-      let args = try Driver.expandResponseFiles(["@" + fooPath.pathString], diagnosticsEngine: diags)
+      let args = try Driver.expandResponseFiles(["@" + fooPath.pathString], fileSystem: localFileSystem, diagnosticsEngine: diags)
       XCTAssertEqual(args, ["Command1", "--kkc", "but", "this", "is", #"\\a"#, "command", #"swift"#, "rocks!" ,"compiler", "-Xlinker", "@loader_path", "mkdir", "Quoted Dir", "cd", "Unquoted Dir", "@NotAFile", #"-flag=quoted string with a "quote" inside"#, "-another-flag", "this", "line", "has", "lots", "of", "whitespace"])
-      let escapingArgs = try Driver.expandResponseFiles(["@" + escapingPath.pathString], diagnosticsEngine: diags)
+      let escapingArgs = try Driver.expandResponseFiles(["@" + escapingPath.pathString], fileSystem: localFileSystem, diagnosticsEngine: diags)
       XCTAssertEqual(escapingArgs, ["swift", "--driver-mode=swiftc", "-v","the end"])
     }
   }
@@ -1042,20 +1042,35 @@ final class SwiftDriverTests: XCTestCase {
   }
 
   func testMultiThreadedWholeModuleOptimizationCompiles() throws {
-    var driver1 = try Driver(args: [
-      "swiftc", "-whole-module-optimization", "foo.swift", "bar.swift", "wibble.swift",
-      "-module-name", "Test", "-num-threads", "4"
-    ])
-    let plannedJobs = try driver1.planBuild()
-    XCTAssertEqual(plannedJobs.count, 2)
-    XCTAssertEqual(plannedJobs[0].kind, .compile)
-    XCTAssertEqual(plannedJobs[0].outputs.count, 3)
-    XCTAssertEqual(plannedJobs[0].outputs[0].file, VirtualPath.temporary(RelativePath("foo.o")))
-    XCTAssertEqual(plannedJobs[0].outputs[1].file, VirtualPath.temporary(RelativePath("bar.o")))
-    XCTAssertEqual(plannedJobs[0].outputs[2].file, VirtualPath.temporary(RelativePath("wibble.o")))
-    XCTAssert(!plannedJobs[0].commandLine.contains(.flag("-primary-file")))
+    do {
+      var driver1 = try Driver(args: [
+        "swiftc", "-whole-module-optimization", "foo.swift", "bar.swift", "wibble.swift",
+        "-module-name", "Test", "-num-threads", "4"
+      ])
+      let plannedJobs = try driver1.planBuild()
+      XCTAssertEqual(plannedJobs.count, 2)
+      XCTAssertEqual(plannedJobs[0].kind, .compile)
+      XCTAssertEqual(plannedJobs[0].outputs.count, 3)
+      XCTAssertEqual(plannedJobs[0].outputs[0].file, VirtualPath.temporary(RelativePath("foo.o")))
+      XCTAssertEqual(plannedJobs[0].outputs[1].file, VirtualPath.temporary(RelativePath("bar.o")))
+      XCTAssertEqual(plannedJobs[0].outputs[2].file, VirtualPath.temporary(RelativePath("wibble.o")))
+      XCTAssert(!plannedJobs[0].commandLine.contains(.flag("-primary-file")))
 
-    XCTAssertEqual(plannedJobs[1].kind, .link)
+      XCTAssertEqual(plannedJobs[1].kind, .link)
+    }
+
+    // emit-module
+    do {
+      var driver = try Driver(args: ["swiftc", "-module-name=ThisModule", "-wmo", "-num-threads", "4", "main.swift", "multi-threaded.swift", "-emit-module", "-o", "test.swiftmodule"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      XCTAssertEqual(plannedJobs[0].kind, .compile)
+      XCTAssertEqual(plannedJobs[0].inputs.count, 2)
+      XCTAssertEqual(plannedJobs[0].inputs[0].file, VirtualPath.relative(RelativePath("main.swift")))
+      XCTAssertEqual(plannedJobs[0].inputs[1].file, VirtualPath.relative(RelativePath("multi-threaded.swift")))
+      XCTAssertEqual(plannedJobs[0].outputs.count, 2)
+      XCTAssertEqual(plannedJobs[0].outputs[0].file, VirtualPath.relative(RelativePath("test.swiftmodule")))
+    }
   }
 
   func testWholeModuleOptimizationOutputFileMap() throws {
@@ -1145,6 +1160,18 @@ final class SwiftDriverTests: XCTestCase {
       XCTAssertEqual(plannedJobs[2].outputs[1].file, .relative(RelativePath("Test.swiftdoc")))
     }
 
+    do {
+      // -o specified
+      var driver = try Driver(args: ["swiftc", "-emit-module", "-o", "/tmp/test.swiftmodule", "input.swift"])
+      let plannedJobs = try driver.planBuild()
+
+      XCTAssertEqual(plannedJobs.count, 2)
+      XCTAssertEqual(plannedJobs[0].kind, .compile)
+      XCTAssertEqual(plannedJobs[0].outputs[0].file, .temporary(RelativePath("input.swiftmodule")))
+      XCTAssertEqual(plannedJobs[1].kind, .mergeModule)
+      XCTAssertEqual(plannedJobs[1].inputs[0].file, .temporary(RelativePath("input.swiftmodule")))
+      XCTAssertEqual(plannedJobs[1].outputs[0].file, .absolute(AbsolutePath("/tmp/test.swiftmodule")))
+    }
   }
 
   func testRepl() throws {
@@ -1583,6 +1610,30 @@ final class SwiftDriverTests: XCTestCase {
       XCTAssertEqual(plannedJobs.count, 1)
       let job = plannedJobs[0]
       XCTAssertTrue(job.commandLine.contains(.flag("-print-educational-notes")))
+    }
+  }
+
+  func testScanDependenciesOption() throws {
+    do {
+      var driver = try Driver(args: ["swiftc", "-scan-dependencies", "foo.swift"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      XCTAssertTrue(job.commandLine.contains(.flag("-scan-dependencies")))
+    }
+
+    // Test .d output
+    do {
+      var driver = try Driver(args: ["swiftc", "-scan-dependencies",
+                                     "-emit-dependencies", "foo.swift"])
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(plannedJobs.count, 1)
+      let job = plannedJobs[0]
+      print("")
+      print(job.commandLine)
+      XCTAssertTrue(job.commandLine.contains(.flag("-scan-dependencies")))
+      XCTAssertTrue(job.commandLine.contains(.flag("-emit-dependencies-path")))
+      XCTAssertTrue(job.commandLine.contains(.path(.temporary(RelativePath("foo.d")))))
     }
   }
 
