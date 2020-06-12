@@ -53,7 +53,7 @@ public struct OutputFileMap: Equatable {
     let resolvedKeyValues: [(VirtualPath, [FileType : VirtualPath])] = entries.map {
       let resolvedKey: VirtualPath
       // Special case for single dependency record, leave it as is
-      if ($0.key == .relative(.init(""))) {
+      if $0.key == .relative(.init("")) {
         resolvedKey = $0.key
       } else {
         resolvedKey = $0.key.resolvedRelativePath(base: absPath)
@@ -63,7 +63,7 @@ public struct OutputFileMap: Equatable {
       }
       return (resolvedKey, resolvedValue)
     }
-    return OutputFileMap(entries: .init(resolvedKeyValues, uniquingKeysWith: { _,_ in
+    return OutputFileMap(entries: .init(resolvedKeyValues, uniquingKeysWith: { _, _ in
       fatalError("Paths collided after resolving")
     }))
   }
@@ -93,7 +93,7 @@ public struct OutputFileMap: Equatable {
   ) throws {
     let encoder = JSONEncoder()
 
-  #if os(Linux)
+  #if os(Linux) || os(Android)
     encoder.outputFormatting = [.prettyPrinted]
   #else
     if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {

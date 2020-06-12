@@ -24,13 +24,13 @@ ln -s /path/to/built/swift-driver $SOME_PATH/swift
 ln -s /path/to/built/swift-driver $SOME_PATH/swiftc
 ```
 
-Swift packages can be built with the new Swift driver by overriding `SWIFT_EXEC` to refer to the `swiftc` symbolic link created above, e.g.,
+Swift packages can be built with the new Swift driver by overriding `SWIFT_EXEC` to refer to the `swiftc` symbolic link created above and `SWIFT_DRIVER_SWIFT_EXEC` to refer to the original `swiftc`, e.g.,
 
 ```
-SWIFT_EXEC=$SOME_PATH/swiftc swift build
+SWIFT_EXEC=$SOME_PATH/swiftc SWIFT_DRIVER_SWIFT_EXEC=$TOOLCHAIN_PATH/bin/swiftc swift build
 ```
 
-Similarly, one can use the new Swift driver within Xcode by adding a custom build setting (usually at the project level) named `SWIFT_EXEC` that refers to `$SOME_PATH/swiftc`.
+Similarly, one can use the new Swift driver within Xcode by adding a custom build setting (usually at the project level) named `SWIFT_EXEC` that refers to `$SOME_PATH/swiftc` and adding `-driver-use-frontend-path $TOOLCHAIN_DIR/usr/bin/swiftc` to `Other Swift Flags`.
 
 ## Building with CMake
 
@@ -85,7 +85,7 @@ on the command line:
 ```
 $ SWIFT_DRIVER_ENABLE_INTEGRATION_TESTS=1 \
   SWIFT_DRIVER_LIT_DIR=/path/to/build/Ninja-ReleaseAssert/swift-.../test-... \
-  swift test --parallel
+  swift test -c release --parallel
 ```
 
 #### Preparing a Linux docker for debug
@@ -151,7 +151,7 @@ The goal of the new Swift driver is to provide a drop-in replacement for the exi
   * [x] Immediate mode
 * Features
   * [x] Precompiled bridging headers
-  * [ ] Support embedding of bitcode
+  * [x] Support embedding of bitcode
   * [ ] Incremental compilation
   * [x] Parseable output, as used by SwiftPM
   * [x] Response files

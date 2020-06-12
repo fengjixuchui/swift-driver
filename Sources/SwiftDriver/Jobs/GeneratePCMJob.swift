@@ -39,7 +39,7 @@ extension Driver {
     } else {
       output = .init(
         file: try VirtualPath(
-          path: moduleName.appendingFileTypeExtension(.pcm)),
+          path: moduleOutputInfo.name.appendingFileTypeExtension(.pcm)),
         type: .pcm)
     }
 
@@ -48,11 +48,12 @@ extension Driver {
     commandLine.appendPath(output.file)
 
     try addCommonFrontendOptions(
-      commandLine: &commandLine, bridgingHeaderHandling: .ignored)
+      commandLine: &commandLine, inputs: &inputs, bridgingHeaderHandling: .ignored)
 
     try commandLine.appendLast(.indexStorePath, from: &parsedOptions)
 
     return Job(
+      moduleName: moduleOutputInfo.name,
       kind: .generatePCM,
       tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
       commandLine: commandLine,

@@ -28,7 +28,7 @@ public struct IncrementalCompilation {
        compilerMode: CompilerMode,
        outputFileMap: OutputFileMap?,
        compilerOutputType: FileType?,
-       moduleOutput: ModuleOutput?,
+       moduleOutput: ModuleOutputInfo.ModuleOutput?,
        fileSystem: FileSystem,
        inputFiles: [TypedVirtualPath],
        diagnosticEngine: DiagnosticsEngine,
@@ -57,7 +57,7 @@ public struct IncrementalCompilation {
 
     let argsHash = Self.computeArgsHash(parsedOptions)
     self.argsHash = argsHash
-    let lastBuildTime = Date.init()
+    let lastBuildTime = Date()
     self.lastBuildTime = lastBuildTime
 
     if let buRP = buildRecordPath, enableIncrementalBuild {

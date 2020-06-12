@@ -14,7 +14,7 @@ import SwiftOptions
 
 extension Driver {
   /// Add the appropriate compile mode option to the command line for a compile job.
-  private mutating func addCompileModeOption(outputType: FileType?, commandLine: inout [Job.ArgTemplate]) {
+  mutating func addCompileModeOption(outputType: FileType?, commandLine: inout [Job.ArgTemplate]) {
     if let compileOption = outputType?.frontendCompileOption {
       commandLine.appendFlag(compileOption)
     } else {
@@ -26,7 +26,7 @@ extension Driver {
     }
   }
 
-  fileprivate mutating func computePrimaryOutput(for input: TypedVirtualPath, outputType: FileType,
+  mutating func computePrimaryOutput(for input: TypedVirtualPath, outputType: FileType,
                                         isTopLevel: Bool) -> TypedVirtualPath {
     if let path = outputFileMap?.existingOutput(inputFile: input.file, outputType: outputType) {
       return TypedVirtualPath(file: path, type: outputType)
@@ -34,7 +34,7 @@ extension Driver {
 
     if isTopLevel {
       if let baseOutput = parsedOptions.getLastArgument(.o)?.asSingle,
-         let baseOutputPath = try? VirtualPath(path: baseOutput){
+         let baseOutputPath = try? VirtualPath(path: baseOutput) {
         return TypedVirtualPath(file: baseOutputPath, type: outputType)
       } else if compilerOutputType?.isTextual == true {
         return TypedVirtualPath(file: .standardOutput, type: outputType)
@@ -42,8 +42,8 @@ extension Driver {
     }
 
     let baseName: String
-    if (!compilerMode.usesPrimaryFileInputs && numThreads == 0) {
-      baseName = moduleName
+    if !compilerMode.usesPrimaryFileInputs && numThreads == 0 {
+      baseName = moduleOutputInfo.name
     } else {
       baseName = input.file.basenameWithoutExt
     }
@@ -56,28 +56,31 @@ extension Driver {
     return TypedVirtualPath(file: .relative(.init(baseName.appendingFileTypeExtension(outputType))), type: outputType)
   }
 
-  /// Add the compiler inputs for a frontend compilation job, and return the
-  /// corresponding primary set of outputs.
-  mutating func addCompileInputs(primaryInputs: [TypedVirtualPath],
-                                 inputs: inout [TypedVirtualPath],
-                                 commandLine: inout [Job.ArgTemplate]) -> [TypedVirtualPath] {
-    // Is this compile job top-level
-    let isTopLevel: Bool
-
-    switch compilerOutputType {
+  /// Is this compile job top-level
+  func isTopLevelOutput(type: FileType?) -> Bool {
+    switch type {
     case .assembly, .sil, .raw_sil, .llvmIR, .ast, .jsonDependencies:
-      isTopLevel = true
+      return true
     case .object:
-      isTopLevel = (linkerOutputType == nil)
+      return (linkerOutputType == nil)
     case .swiftModule:
-      isTopLevel = compilerMode.isSingleCompilation && moduleOutput?.isTopLevel ?? false
+      return compilerMode.isSingleCompilation && moduleOutputInfo.output?.isTopLevel ?? false
     case .swift, .sib, .image, .dSYM, .dependencies, .autolink,
          .swiftDocumentation, .swiftInterface,
          .swiftSourceInfoFile, .raw_sib, .llvmBitcode, .diagnostics,
          .objcHeader, .swiftDeps, .remap, .importedModules, .tbd, .moduleTrace,
-         .indexData, .optimizationRecord, .pcm, .pch, nil:
-      isTopLevel = false
+         .indexData, .optimizationRecord, .pcm, .pch, .clangModuleMap, nil:
+      return false
     }
+  }
+
+  /// Add the compiler inputs for a frontend compilation job, and return the
+  /// corresponding primary set of outputs.
+  mutating func addCompileInputs(primaryInputs: [TypedVirtualPath],
+                                 inputs: inout [TypedVirtualPath],
+                                 outputType: FileType?,
+                                 commandLine: inout [Job.ArgTemplate]) -> [TypedVirtualPath] {
+    let isTopLevel = isTopLevelOutput(type: outputType)
 
     // Collect the set of input files that are part of the Swift compilation.
     let swiftInputFiles: [TypedVirtualPath] = inputFiles.filter { $0.type.isPartOfSwiftCompilation }
@@ -104,16 +107,16 @@ extension Driver {
 
       // If there is a primary output or we are doing multithreaded compiles,
       // add an output for the input.
-      if let compilerOutputType = compilerOutputType,
-        isPrimary || (!usesPrimaryFileInputs && isMultithreaded && compilerOutputType.isAfterLLVM) {
+      if let outputType = outputType,
+        isPrimary || (!usesPrimaryFileInputs && isMultithreaded && outputType.isAfterLLVM) {
         primaryOutputs.append(computePrimaryOutput(for: input,
-                                                   outputType: compilerOutputType,
+                                                   outputType: outputType,
                                                    isTopLevel: isTopLevel))
       }
     }
 
     // When not using primary file inputs or multithreading, add a single output.
-    if let outputType = compilerOutputType,
+    if let outputType = outputType,
       !usesPrimaryFileInputs && !(isMultithreaded && outputType.isAfterLLVM) {
       primaryOutputs.append(computePrimaryOutput(
         for: TypedVirtualPath(file: try! VirtualPath(path: ""),
@@ -133,7 +136,10 @@ extension Driver {
 
     commandLine.appendFlag("-frontend")
     addCompileModeOption(outputType: outputType, commandLine: &commandLine)
-    let primaryOutputs = addCompileInputs(primaryInputs: primaryInputs, inputs: &inputs, commandLine: &commandLine)
+    let primaryOutputs = addCompileInputs(primaryInputs: primaryInputs,
+                                          inputs: &inputs,
+                                          outputType: outputType,
+                                          commandLine: &commandLine)
     outputs += primaryOutputs
     outputs += try addFrontendSupplementaryOutputArguments(commandLine: &commandLine, primaryInputs: primaryInputs)
 
@@ -146,7 +152,7 @@ extension Driver {
       commandLine.appendFlag(.disableObjcAttrRequiresFoundationModule)
     }
 
-    try addCommonFrontendOptions(commandLine: &commandLine)
+    try addCommonFrontendOptions(commandLine: &commandLine, inputs: &inputs)
     // FIXME: MSVC runtime flags
 
     if parsedOptions.hasArgument(.parseAsLibrary, .emitLibrary) {
@@ -195,10 +201,11 @@ extension Driver {
 
     // If we're creating emit module job, order the compile jobs after that.
     if shouldCreateEmitModuleJob {
-      inputs.append(TypedVirtualPath(file: moduleOutput!.outputPath, type: .swiftModule))
+      inputs.append(TypedVirtualPath(file: moduleOutputInfo.output!.outputPath, type: .swiftModule))
     }
 
     return Job(
+      moduleName: moduleOutputInfo.name,
       kind: .compile,
       tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
       commandLine: commandLine,
@@ -247,7 +254,7 @@ extension FileType {
 
     case .swift, .dSYM, .autolink, .dependencies, .swiftDocumentation, .pcm,
          .diagnostics, .objcHeader, .image, .swiftDeps, .moduleTrace, .tbd,
-         .optimizationRecord, .swiftInterface, .swiftSourceInfoFile:
+         .optimizationRecord, .swiftInterface, .swiftSourceInfoFile, .clangModuleMap:
       fatalError("Output type can never be a primary output")
     }
   }

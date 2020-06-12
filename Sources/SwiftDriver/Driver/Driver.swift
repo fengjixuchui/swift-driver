@@ -14,32 +14,6 @@ import TSCUtility
 import Foundation
 import SwiftOptions
 
-/// How should the Swift module output be handled?
-public enum ModuleOutput: Equatable {
-  /// The Swift module is a top-level output.
-  case topLevel(VirtualPath)
-
-  /// The Swift module is an auxiliary output.
-  case auxiliary(VirtualPath)
-
-  public var outputPath: VirtualPath {
-    switch self {
-    case .topLevel(let path):
-      return path
-
-    case .auxiliary(let path):
-      return path
-    }
-  }
-
-  public var isTopLevel: Bool {
-    switch self {
-    case .topLevel: return true
-    default: return false
-    }
-  }
-}
-
 /// The Swift driver.
 public struct Driver {
   public enum Error: Swift.Error, Equatable, DiagnosticData {
@@ -50,6 +24,10 @@ public struct Driver {
     case subcommandPassedToDriver
     case integratedReplRemoved
     case conflictingOptions(Option, Option)
+    // Explicit Module Build Failures
+    case malformedModuleDependency(String, String)
+    case missingModuleDependency(String)
+    case dependencyScanningFailure(Int, String)
 
     public var description: String {
       switch self {
@@ -68,6 +46,13 @@ public struct Driver {
         return "Compiler-internal integrated REPL has been removed; use the LLDB-enhanced REPL instead."
       case .conflictingOptions(let one, let two):
         return "conflicting options '\(one.spelling)' and '\(two.spelling)'"
+      // Explicit Module Build Failures
+      case .malformedModuleDependency(let moduleName, let errorDescription):
+        return "Malformed Module Dependency: \(moduleName), \(errorDescription)"
+      case .missingModuleDependency(let moduleName):
+        return "Missing Module Dependency Info: \(moduleName)"
+      case .dependencyScanningFailure(let code, let error):
+        return "Module Dependency Scanner returned with non-zero exit status: \(code), \(error)"
       }
     }
   }
@@ -131,24 +116,17 @@ public struct Driver {
   /// The specified maximum number of parallel jobs to execute.
   public let numParallelJobs: Int?
 
-  /// The level of debug information to produce.
-  public let debugInfoLevel: DebugInfoLevel?
-
   /// The set of sanitizers that were requested
   public let enabledSanitizers: Set<Sanitizer>
 
-  /// The debug info format to use.
-  public let debugInfoFormat: DebugInfoFormat
+  /// The debug information to produce.
+  public let debugInfo: DebugInfo
 
-  /// The form that the module output will take, e.g., top-level vs. auxiliary, and the path at which the module should be emitted.
-  /// `nil` if no module should be emitted.
-  public let moduleOutput: ModuleOutput?
+  // The information about the module to produce.
+  public let moduleOutputInfo: ModuleOutputInfo
 
   /// Code & data for incremental compilation
   public let incrementalCompilation: IncrementalCompilation
-
-  /// The name of the Swift module being built.
-  public let moduleName: String
 
   /// The path of the SDK.
   public let sdkPath: String?
@@ -186,13 +164,15 @@ public struct Driver {
   /// Path to the optimization record.
   public let optimizationRecordPath: VirtualPath?
 
-  /// Whether 'dwarfdump' should be used to verify debug info.
-  public let shouldVerifyDebugInfo: Bool
-
   /// If the driver should force emit module in a single invocation.
   ///
   /// This will force the driver to first emit the module and then run compile jobs.
   public var forceEmitModuleInSingleInvocation: Bool = false
+
+  /// The module dependency graph, which is populated during the planning phase
+  /// only when all modules will be prebuilt and treated as explicit by the
+  /// various compilation jobs.
+  var interModuleDependencyGraph: InterModuleDependencyGraph? = nil
 
   /// Handler for emitting diagnostics to stderr.
   public static let stderrDiagnosticsHandler: DiagnosticsEngine.DiagnosticsHandler = { diagnostic in
@@ -241,7 +221,7 @@ public struct Driver {
       throw Error.subcommandPassedToDriver
     }
 
-    var args = try Self.expandResponseFiles(args, fileSystem: fileSystem, diagnosticsEngine: self.diagnosticEngine)[...]
+    var args = try Self.expandResponseFiles(args, fileSystem: fileSystem, diagnosticsEngine: self.diagnosticEngine)
 
     self.driverKind = try Self.determineDriverKind(args: &args)
     self.optionTable = OptionTable()
@@ -318,13 +298,12 @@ public struct Driver {
     try Self.validateWarningControlArgs(&parsedOptions)
 
     // Compute debug information output.
-    (self.debugInfoLevel, self.debugInfoFormat, shouldVerifyDebugInfo: self.shouldVerifyDebugInfo) =
-      Self.computeDebugInfo(&parsedOptions, diagnosticsEngine: diagnosticEngine)
+    self.debugInfo = Self.computeDebugInfo(&parsedOptions, diagnosticsEngine: diagnosticEngine)
 
     // Determine the module we're building and whether/how the module file itself will be emitted.
-    (self.moduleOutput, self.moduleName) = try Self.computeModuleInfo(
+    self.moduleOutputInfo = try Self.computeModuleInfo(
       &parsedOptions, compilerOutputType: compilerOutputType, compilerMode: compilerMode, linkerOutputType: linkerOutputType,
-      debugInfoLevel: debugInfoLevel, diagnosticsEngine: diagnosticEngine)
+      debugInfoLevel: debugInfo.level, diagnosticsEngine: diagnosticEngine)
 
     // Determine the state for incremental compilation
     self.incrementalCompilation = IncrementalCompilation(
@@ -332,7 +311,7 @@ public struct Driver {
       compilerMode: compilerMode,
       outputFileMap: self.outputFileMap,
       compilerOutputType: self.compilerOutputType,
-        moduleOutput: self.moduleOutput,
+      moduleOutput: self.moduleOutputInfo.output,
       fileSystem: fileSystem,
       inputFiles: inputFiles,
       diagnosticEngine: diagnosticEngine,
@@ -360,21 +339,21 @@ public struct Driver {
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.referenceDependenciesFilePath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .swiftDeps, isOutput: .emitReferenceDependencies,
         outputPath: .emitReferenceDependenciesPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.serializedDiagnosticsFilePath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .diagnostics, isOutput: .serializeDiagnostics,
         outputPath: .serializeDiagnosticsPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     // FIXME: -fixits-output-path
     self.objcGeneratedHeaderPath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .objcHeader, isOutput: .emitObjcHeader,
@@ -382,34 +361,34 @@ public struct Driver {
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.loadedModuleTracePath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .moduleTrace, isOutput: .emitLoadedModuleTrace,
         outputPath: .emitLoadedModuleTracePath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.tbdPath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .tbd, isOutput: .emitTbd,
         outputPath: .emitTbdPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.moduleDocOutputPath = try Self.computeModuleDocOutputPath(
-        &parsedOptions, moduleOutputPath: self.moduleOutput?.outputPath,
+        &parsedOptions, moduleOutputPath: self.moduleOutputInfo.output?.outputPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.swiftInterfacePath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .swiftInterface, isOutput: .emitModuleInterface,
         outputPath: .emitModuleInterfacePath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
     self.optimizationRecordPath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .optimizationRecord,
         isOutput: .saveOptimizationRecord,
@@ -417,7 +396,7 @@ public struct Driver {
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleName)
+        moduleName: moduleOutputInfo.name)
   }
 }
 
@@ -508,25 +487,28 @@ extension Driver {
         continue
       } else if char.isWhitespace && !quoted {
         // This is unquoted, unescaped whitespace, start a new token.
-        tokens.append(token)
-        token = ""
+        if !token.isEmpty {
+          tokens.append(token)
+          token = ""
+        }
         continue
       }
 
       token.append(char)
     }
     // Add the final token
-    tokens.append(token)
+    if !token.isEmpty {
+      tokens.append(token)
+    }
 
-    // Filter any empty tokens that might be parsed if there's excessive whitespace.
-    return tokens.filter { !$0.isEmpty }
+    return tokens
   }
 
   /// Tokenize each line of the response file, omitting empty lines.
   ///
   /// - Parameter content: response file's content to be tokenized.
   private static func tokenizeResponseFile(_ content: String) -> [String] {
-    #if !os(macOS) && !os(Linux)
+    #if !os(macOS) && !os(Linux) && !os(Android)
       #warning("Response file tokenization unimplemented for platform; behavior may be incorrect")
     #endif
     return content.split { $0 == "\n" || $0 == "\r\n" }
@@ -581,7 +563,7 @@ extension Driver {
   /// Determine the driver kind based on the command-line arguments, consuming the arguments
   /// conveying this information.
   public static func determineDriverKind(
-    args: inout ArraySlice<String>
+    args: inout [String]
   ) throws -> DriverKind {
     // Get the basename of the driver executable.
     let execRelPath = args.removeFirst()
@@ -610,8 +592,6 @@ extension Driver {
       return .batch
     case "swift-autolink-extract":
       return .autolinkExtract
-    case "swift-indent":
-      return .indent
     default:
       throw Error.invalidDriverName(driverName)
     }
@@ -650,6 +630,13 @@ extension Driver {
       return
     }
 
+    if parsedOptions.contains(.driverPrintBindings) {
+      for job in jobs {
+        try printBindings(job)
+      }
+      return
+    }
+
     if parsedOptions.contains(.driverPrintGraphviz) {
       var serializer = DOTJobGraphSerializer(jobs: jobs)
       serializer.writeDOT(to: &stdoutStream)
@@ -671,6 +658,7 @@ extension Driver {
     let jobExecutor = JobExecutor(
         jobs: jobs, resolver: resolver,
         executorDelegate: executorDelegate,
+        diagnosticsEngine: diagnosticEngine,
         numParallelJobs: numParallelJobs,
         processSet: processSet,
         forceResponseFiles: forceResponseFiles,
@@ -721,6 +709,21 @@ extension Driver {
       }
     }
     print(result)
+  }
+
+  private func printBindings(_ job: Job) throws {
+    try stdoutStream <<< #"# ""# <<< toolchain.hostTargetTriple().triple
+    stdoutStream <<< #"" - ""# <<< job.tool.basename
+    stdoutStream <<< #"", inputs: ["#
+    stdoutStream <<< job.inputs.map { "\"" + $0.file.name + "\"" }.joined(separator: ", ")
+
+    stdoutStream <<< "], output: {"
+
+    stdoutStream <<< job.outputs.map { $0.type.name + ": \"" + $0.file.name + "\"" }.joined(separator: ", ")
+
+    stdoutStream <<< "}"
+    stdoutStream <<< "\n"
+    stdoutStream.flush()
   }
 
   private func printVersion<S: OutputByteStream>(outputStream: inout S) throws {
@@ -975,10 +978,20 @@ extension Driver {
       default:
         fatalError("unhandled output mode option \(outputOption)")
       }
-    } else if (parsedOptions.hasArgument(.emitModule, .emitModulePath)) {
+    } else if parsedOptions.hasArgument(.emitModule, .emitModulePath) {
       compilerOutputType = .swiftModule
-    } else if (driverKind != .interactive) {
+    } else if driverKind != .interactive {
       linkerOutputType = .executable
+    }
+
+    // warn if -embed-bitcode is set and the output type is not an object
+    if parsedOptions.hasArgument(.embedBitcode) && compilerOutputType != .object {
+      diagnosticsEngine.emit(.warn_ignore_embed_bitcode)
+      parsedOptions.eraseArgument(.embedBitcode)
+    }
+    if parsedOptions.hasArgument(.embedBitcodeMarker) && compilerOutputType != .object {
+      diagnosticsEngine.emit(.warn_ignore_embed_bitcode_marker)
+      parsedOptions.eraseArgument(.embedBitcodeMarker)
     }
 
     return (compilerOutputType, linkerOutputType)
@@ -993,6 +1006,14 @@ extension Diagnostic.Message {
       use '\(driverKind.usage) input-filename'
       """
     )
+  }
+
+  static var warn_ignore_embed_bitcode: Diagnostic.Message {
+    .warning("ignoring -embed-bitcode since no object file is being generated")
+  }
+
+  static var warn_ignore_embed_bitcode_marker: Diagnostic.Message {
+    .warning("ignoring -embed-bitcode-marker since no object file is being generated")
   }
 }
 
@@ -1055,11 +1076,11 @@ extension Diagnostic.Message {
 // Debug information
 extension Driver {
   /// Compute the level of debug information we are supposed to produce.
-  private static func computeDebugInfo(_ parsedOptions: inout ParsedOptions, diagnosticsEngine: DiagnosticsEngine) -> (DebugInfoLevel?, DebugInfoFormat, shouldVerifyDebugInfo: Bool) {
+  private static func computeDebugInfo(_ parsedOptions: inout ParsedOptions, diagnosticsEngine: DiagnosticsEngine) -> DebugInfo {
     var shouldVerify = parsedOptions.hasArgument(.verifyDebugInfo)
 
     // Determine the debug level.
-    let level: DebugInfoLevel?
+    let level: DebugInfo.Level?
     if let levelOption = parsedOptions.getLast(in: .g), levelOption.option != .gnone {
       switch levelOption.option {
       case .g:
@@ -1084,9 +1105,9 @@ extension Driver {
     }
 
     // Determine the debug info format.
-    let format: DebugInfoFormat
+    let format: DebugInfo.Format
     if let formatArg = parsedOptions.getLastArgument(.debugInfoFormat) {
-      if let parsedFormat = DebugInfoFormat(rawValue: formatArg.asSingle) {
+      if let parsedFormat = DebugInfo.Format(rawValue: formatArg.asSingle) {
         format = parsedFormat
       } else {
         diagnosticsEngine.emit(.error_invalid_arg_value(arg: .debugInfoFormat, value: formatArg.asSingle))
@@ -1106,7 +1127,7 @@ extension Driver {
       diagnosticsEngine.emit(.error_argument_not_allowed_with(arg: format.rawValue, other: levelOption.spelling))
     }
 
-    return (level, format, shouldVerifyDebugInfo: shouldVerify)
+    return DebugInfo(format: format, level: level, shouldVerify: shouldVerify)
   }
 
   /// Parses the set of `-sanitize={sanitizer}` arguments and returns all the
@@ -1247,9 +1268,9 @@ extension Driver {
     compilerOutputType: FileType?,
     compilerMode: CompilerMode,
     linkerOutputType: LinkOutputType?,
-    debugInfoLevel: DebugInfoLevel?,
+    debugInfoLevel: DebugInfo.Level?,
     diagnosticsEngine: DiagnosticsEngine
-  ) throws -> (ModuleOutput?, String) {
+  ) throws -> ModuleOutputInfo {
     // Figure out what kind of module we will output.
     enum ModuleOutputKind {
       case topLevel
@@ -1265,9 +1286,9 @@ extension Driver {
       // An option has been passed which requires a module, but the user hasn't
       // requested one. Generate a module, but treat it as an intermediate output.
       moduleOutputKind = .auxiliary
-    } else if (compilerMode != .singleCompile &&
+    } else if compilerMode != .singleCompile &&
       parsedOptions.hasArgument(.emitObjcHeader, .emitObjcHeaderPath,
-                                .emitModuleInterface, .emitModuleInterfacePath)) {
+                                .emitModuleInterface, .emitModuleInterfacePath) {
       // An option has been passed which requires whole-module knowledge, but we
       // don't have that. Generate a module, but treat it as an intermediate
       // output.
@@ -1285,6 +1306,7 @@ extension Driver {
 
     // Determine the name of the module.
     var moduleName: String
+    var moduleNameIsFallback = false
     if let arg = parsedOptions.getLastArgument(.moduleName) {
       moduleName = arg.asSingle
     } else if compilerMode == .repl {
@@ -1308,7 +1330,7 @@ extension Driver {
     }
 
     func fallbackOrDiagnose(_ error: Diagnostic.Message) {
-      // FIXME: Current driver notes that this is a "fallback module name".
+      moduleNameIsFallback = true
       if compilerOutputType == nil || maybeBuildingExecutable(&parsedOptions, linkerOutputType: linkerOutputType) {
         moduleName = "main"
       }
@@ -1326,7 +1348,7 @@ extension Driver {
 
     // If we're not emiting a module, we're done.
     if moduleOutputKind == nil {
-      return (nil, moduleName)
+      return ModuleOutputInfo(output: nil, name: moduleName, nameIsFallback: moduleNameIsFallback)
     }
 
     // Determine the module file to output.
@@ -1352,9 +1374,9 @@ extension Driver {
 
     switch moduleOutputKind! {
     case .topLevel:
-      return (.topLevel(moduleOutputPath), moduleName)
+      return ModuleOutputInfo(output: .topLevel(moduleOutputPath), name: moduleName, nameIsFallback: moduleNameIsFallback)
     case .auxiliary:
-      return (.auxiliary(moduleOutputPath), moduleName)
+      return ModuleOutputInfo(output: .auxiliary(moduleOutputPath), name: moduleName, nameIsFallback: moduleNameIsFallback)
     }
   }
 }
@@ -1393,7 +1415,7 @@ extension Driver {
     }
 
     // Delete trailing /.
-    sdkPath = sdkPath.map{ $0.last == "/" ? String($0.dropLast()) : $0 }
+    sdkPath = sdkPath.map { $0.last == "/" ? String($0.dropLast()) : $0 }
 
     // Validate the SDK if we found one.
     if let sdkPath = sdkPath {

@@ -59,24 +59,31 @@ public enum VirtualPath: Hashable {
   /// Whether this virtual path is to a temporary.
   public var isTemporary: Bool {
     switch self {
-    case .relative(_):
+    case .relative, .absolute, .standardInput, .standardOutput:
       return false
-
-    case .absolute(_):
-      return false
-
-    case .standardInput, .standardOutput:
-      return false
-
-    case .temporary(_):
+    case .temporary:
       return true
     }
   }
 
   public var absolutePath: AbsolutePath? {
     switch self {
-    case let .absolute(absolutePath): return absolutePath
-    default: return nil
+    case let .absolute(absolutePath):
+      return absolutePath
+    case .relative, .temporary, .standardInput, .standardOutput:
+      return nil
+    }
+  }
+
+  /// Retrieve the basename of the path.
+  public var basename: String {
+    switch self {
+    case .absolute(let path):
+      return path.basename
+    case .relative(let path), .temporary(let path):
+      return path.basename
+    case .standardInput, .standardOutput:
+      return ""
     }
   }
 

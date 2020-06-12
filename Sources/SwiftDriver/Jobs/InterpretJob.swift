@@ -27,7 +27,7 @@ extension Driver {
       commandLine.appendFlag(.disableObjcAttrRequiresFoundationModule)
     }
 
-    try addCommonFrontendOptions(commandLine: &commandLine)
+    try addCommonFrontendOptions(commandLine: &commandLine, inputs: &inputs)
     // FIXME: MSVC runtime flags
 
     try commandLine.appendLast(.parseSil, from: &parsedOptions)
@@ -41,10 +41,11 @@ extension Driver {
       targetTriple: self.targetTriple)
 
     return Job(
+      moduleName: moduleOutputInfo.name,
       kind: .interpret,
       tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
       commandLine: commandLine,
-      inputs:inputs,
+      inputs: inputs,
       outputs: [],
       extraEnvironment: extraEnvironment,
       requiresInPlaceExecution: true,

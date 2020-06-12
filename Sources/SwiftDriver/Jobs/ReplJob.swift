@@ -13,8 +13,9 @@
 extension Driver {
   mutating func replJob() throws -> Job {
     var commandLine: [Job.ArgTemplate] = swiftCompilerPrefixArgs.map { Job.ArgTemplate.flag($0) }
+    var inputs: [TypedVirtualPath] = []
 
-    try addCommonFrontendOptions(commandLine: &commandLine)
+    try addCommonFrontendOptions(commandLine: &commandLine, inputs: &inputs)
     // FIXME: MSVC runtime flags
 
     try commandLine.appendLast(.importObjcHeader, from: &parsedOptions)
@@ -23,10 +24,11 @@ extension Driver {
     // Squash important frontend options into a single argument for LLDB.
     let lldbArg = "--repl=\(commandLine.joinedArguments)"
     return Job(
+      moduleName: moduleOutputInfo.name,
       kind: .repl,
       tool: .absolute(try toolchain.getToolPath(.lldb)),
       commandLine: [Job.ArgTemplate.flag(lldbArg)],
-      inputs: [],
+      inputs: inputs,
       outputs: [],
       requiresInPlaceExecution: true
     )

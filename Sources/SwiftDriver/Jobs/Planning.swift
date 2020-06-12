@@ -52,6 +52,26 @@ extension Driver {
       }
     }
 
+    // If asked, add jobs to precompile module dependencies
+    if parsedOptions.contains(.driverExplicitModuleBuild) ||
+        parsedOptions.contains(.driverPrintModuleDependenciesJobs) {
+      let modulePrebuildJobs = try generateExplicitModuleBuildJobs()
+
+      if parsedOptions.contains(.driverExplicitModuleBuild) {
+        jobs.append(contentsOf: modulePrebuildJobs)
+      }
+
+      // If we've been asked to prebuild module dependencies,
+      // for the time being, just print the jobs' compile commands.
+      if parsedOptions.contains(.driverPrintModuleDependenciesJobs) {
+        let forceResponseFiles = parsedOptions.contains(.driverForceResponseFiles)
+        for job in modulePrebuildJobs {
+          try Self.printJob(job, resolver: try ArgsResolver(),
+                            forceResponseFiles: forceResponseFiles)
+        }
+      }
+    }
+
     // Precompile the bridging header if needed.
     if let importedObjCHeader = importedObjCHeader,
       let bridgingPrecompiledHeader = bridgingPrecompiledHeader {
@@ -64,6 +84,8 @@ extension Driver {
       jobs.append(try emitModuleJob())
     }
 
+    var backendJobs = [Job]()
+
     let partitions: BatchPartitions?
     switch compilerMode {
     case .batchCompile(let batchInfo):
@@ -73,12 +95,24 @@ extension Driver {
       fatalError("compiler mode \(compilerMode) is handled elsewhere")
 
     case .singleCompile:
-      // Create a single compile job for all of the files, none of which
-      // are primary.
-      var jobOutputs: [TypedVirtualPath] = []
-      let job = try compileJob(primaryInputs: [], outputType: compilerOutputType, allOutputs: &jobOutputs)
-      jobs.append(job)
-      addJobOutputs(jobOutputs)
+      if parsedOptions.hasArgument(.embedBitcode),
+        inputFiles.allSatisfy({ $0.type.isPartOfSwiftCompilation }) {
+        var jobOutputs: [TypedVirtualPath] = []
+        let job = try compileJob(primaryInputs: [], outputType: .llvmBitcode, allOutputs: &jobOutputs)
+        jobs.append(job)
+        for input in job.outputs.filter({ $0.type == .llvmBitcode }) {
+          let job = try backendJob(input: input, allOutputs: &jobOutputs)
+          backendJobs.append(job)
+        }
+        addJobOutputs(jobOutputs)
+      } else {
+        // Create a single compile job for all of the files, none of which
+        // are primary.
+        var jobOutputs: [TypedVirtualPath] = []
+        let job = try compileJob(primaryInputs: [], outputType: compilerOutputType, allOutputs: &jobOutputs)
+        jobs.append(job)
+        addJobOutputs(jobOutputs)
+      }
 
       partitions = nil
 
@@ -110,10 +144,21 @@ extension Driver {
           primaryInputs = [input]
         }
 
-        var jobOutputs: [TypedVirtualPath] = []
-        let job = try compileJob(primaryInputs: primaryInputs, outputType: compilerOutputType, allOutputs: &jobOutputs)
-        jobs.append(job)
-        addJobOutputs(jobOutputs)
+        if parsedOptions.hasArgument(.embedBitcode) {
+          var jobOutputs: [TypedVirtualPath] = []
+          let job = try compileJob(primaryInputs: primaryInputs, outputType: .llvmBitcode, allOutputs: &jobOutputs)
+          jobs.append(job)
+          for input in job.outputs.filter({ $0.type == .llvmBitcode }) {
+            let job = try backendJob(input: input, allOutputs: &jobOutputs)
+            backendJobs.append(job)
+          }
+          addJobOutputs(jobOutputs)
+        } else {
+          var jobOutputs: [TypedVirtualPath] = []
+          let job = try compileJob(primaryInputs: primaryInputs, outputType: compilerOutputType, allOutputs: &jobOutputs)
+          jobs.append(job)
+          addJobOutputs(jobOutputs)
+        }
 
       case .object, .autolink:
         if linkerOutputType != nil {
@@ -123,7 +168,7 @@ extension Driver {
         }
 
       case .swiftModule, .swiftDocumentation:
-        if moduleOutput != nil && linkerOutputType == nil {
+        if moduleOutputInfo.output != nil && linkerOutputType == nil {
           // When generating a .swiftmodule as a top-level output (as opposed
           // to, for example, linking an image), treat .swiftmodule files as
           // inputs to a MergeModule action.
@@ -141,8 +186,10 @@ extension Driver {
       }
     }
 
+    jobs.append(contentsOf: backendJobs)
+
     // Plan the merge-module job, if there are module inputs.
-    if moduleOutput != nil && !moduleInputs.isEmpty && compilerMode.usesPrimaryFileInputs {
+    if moduleOutputInfo.output != nil && !moduleInputs.isEmpty && compilerMode.usesPrimaryFileInputs {
       jobs.append(try mergeModuleJob(inputs: moduleInputs))
     }
 
@@ -161,15 +208,25 @@ extension Driver {
     }
 
     // If we should generate a dSYM, do so.
-    if let linkJob = link, targetTriple.isDarwin, debugInfoLevel != nil {
+    if let linkJob = link, targetTriple.isDarwin, debugInfo.level != nil {
       let dsymJob = try generateDSYMJob(inputs: linkJob.outputs)
       jobs.append(dsymJob)
-      if shouldVerifyDebugInfo {
+      if debugInfo.shouldVerify {
         jobs.append(try verifyDebugInfoJob(inputs: dsymJob.outputs))
       }
     }
 
     return jobs
+  }
+
+  /// Prescan the source files to produce a module dependency graph and turn it into a set
+  /// of jobs required to build all dependencies.
+  public mutating func generateExplicitModuleBuildJobs() throws -> [Job] {
+    interModuleDependencyGraph = try computeModuleDependencyGraph()
+    guard let dependencyGraph = interModuleDependencyGraph else {
+      fatalError("Attempting to perform Explicit Module Build job generation, but the Inter Module Dependency Graph does not exist.")
+    }
+    return try planExplicitModuleDependenciesCompile(dependencyGraph: dependencyGraph)
   }
 
   /// Create a job if needed for simple requests that can be immediately
@@ -182,21 +239,25 @@ extension Driver {
       try commandLine.appendLast(.targetVariant, from: &parsedOptions)
       try commandLine.appendLast(.sdk, from: &parsedOptions)
       try commandLine.appendLast(.resourceDir, from: &parsedOptions)
-      return Job(kind: .printTargetInfo,
-                 tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
-                 commandLine: commandLine,
-                 inputs: [],
-                 outputs: [],
-                 requiresInPlaceExecution: true)
+      return Job(
+        moduleName: moduleOutputInfo.name,
+        kind: .printTargetInfo,
+        tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
+        commandLine: commandLine,
+        inputs: [],
+        outputs: [],
+        requiresInPlaceExecution: true)
     }
 
     if parsedOptions.hasArgument(.version) || parsedOptions.hasArgument(.version_) {
-      return Job(kind: .versionRequest,
-                 tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
-                 commandLine: [.flag("--version")],
-                 inputs: [],
-                 outputs: [],
-                 requiresInPlaceExecution: true)
+      return Job(
+        moduleName: moduleOutputInfo.name,
+        kind: .versionRequest,
+        tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
+        commandLine: [.flag("--version")],
+        inputs: [],
+        outputs: [],
+        requiresInPlaceExecution: true)
     }
 
     if parsedOptions.contains(.help) || parsedOptions.contains(.helpHidden) {
@@ -204,12 +265,14 @@ extension Driver {
       if parsedOptions.contains(.helpHidden) {
         commandLine.append(.flag("-show-hidden"))
       }
-      return Job(kind: .help,
-                 tool: .absolute(try toolchain.getToolPath(.swiftHelp)),
-                 commandLine: commandLine,
-                 inputs: [],
-                 outputs: [],
-                 requiresInPlaceExecution: true)
+      return Job(
+        moduleName: moduleOutputInfo.name,
+        kind: .help,
+        tool: .absolute(try toolchain.getToolPath(.swiftHelp)),
+        commandLine: commandLine,
+        inputs: [],
+        outputs: [],
+        requiresInPlaceExecution: true)
     }
 
     return nil
@@ -393,7 +456,7 @@ extension Driver {
     }
     let numPartitions = numberOfBatchPartitions(info, swiftInputFiles: swiftInputFiles)
 
-    if (parsedOptions.hasArgument(.driverShowJobLifecycle)) {
+    if parsedOptions.hasArgument(.driverShowJobLifecycle) {
       stdoutStream.write("Found \(swiftInputFiles.count) batchable jobs\n")
       stdoutStream.write("Forming into \(numPartitions) batches\n")
       stdoutStream.flush()

@@ -23,7 +23,7 @@ extension Driver {
     commandLine.appendFlag("-frontend")
 
     try addCommonFrontendOptions(
-      commandLine: &commandLine, bridgingHeaderHandling: .parsed)
+      commandLine: &commandLine, inputs: &inputs, bridgingHeaderHandling: .parsed)
 
     try commandLine.appendLast(.indexStorePath, from: &parsedOptions)
 
@@ -62,6 +62,7 @@ extension Driver {
     outputs.append(output)
 
     return Job(
+      moduleName: moduleOutputInfo.name,
       kind: .generatePCH,
       tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
       commandLine: commandLine,
