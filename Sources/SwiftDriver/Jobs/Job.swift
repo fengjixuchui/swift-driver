@@ -31,6 +31,7 @@ public struct Job: Codable, Equatable, Hashable {
     case verifyDebugInfo = "verify-debug-info"
     case printTargetInfo = "print-target-info"
     case versionRequest = "version-request"
+    case scanDependencies = "scan-dependencies"
     case help
   }
 
@@ -143,13 +144,13 @@ extension Job : CustomStringConvertible {
         return "Emitting module for \(moduleName)"
 
     case .generatePCH:
-        return "Compiling bridging header \(displayInputs.first!.file.name)"
+        return "Compiling bridging header \(displayInputs.first?.file.name ?? "")"
 
     case .generatePCM:
-        return "Compiling Clang module \(displayInputs.first!.file.name)"
+        return "Compiling Clang module \(displayInputs.first?.file.name ?? "")"
 
     case .interpret:
-        return "Interpreting \(displayInputs.first!.file.name)"
+        return "Interpreting \(displayInputs.first?.file.name ?? "")"
 
     case .repl:
         return "Executing Swift REPL"
@@ -168,6 +169,9 @@ extension Job : CustomStringConvertible {
 
     case .backend:
       return "Embedding bitcode for \(moduleName) \(displayInputs.first?.file.name ?? "")"
+
+    case .scanDependencies:
+      return "Scanning dependencies for module \(moduleName)"
     }
   }
 }
@@ -178,13 +182,25 @@ extension Job.Kind {
     switch self {
     case .backend, .compile, .mergeModule, .emitModule, .generatePCH,
         .generatePCM, .interpret, .repl, .printTargetInfo,
-        .versionRequest:
+        .versionRequest, .scanDependencies:
         return true
 
     case .autolinkExtract, .generateDSYM, .help, .link, .verifyDebugInfo:
         return false
     }
+  }
 
+  /// Whether this job kind is a compile job.
+  public var isCompile: Bool {
+    switch self {
+    case .compile:
+      return true
+    case .backend, .mergeModule, .emitModule, .generatePCH,
+         .generatePCM, .interpret, .repl, .printTargetInfo,
+         .versionRequest, .autolinkExtract, .generateDSYM,
+         .help, .link, .verifyDebugInfo, .scanDependencies:
+      return false
+    }
   }
 }
 // MARK: - Job.ArgTemplate + Codable

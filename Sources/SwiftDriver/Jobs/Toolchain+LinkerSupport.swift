@@ -24,7 +24,8 @@ extension Toolchain {
     let resourceDirBase: AbsolutePath
     if let resourceDir = parsedOptions.getLastArgument(.resourceDir) {
       resourceDirBase = try AbsolutePath(validating: resourceDir.asSingle)
-    } else if let sdk = parsedOptions.getLastArgument(.sdk),
+    } else if !triple.isDarwin,
+      let sdk = parsedOptions.getLastArgument(.sdk),
       let sdkPath = try? AbsolutePath(validating: sdk.asSingle) {
       resourceDirBase = sdkPath
         .appending(components: "usr", "lib",
@@ -120,86 +121,73 @@ extension Toolchain {
 // MARK: - Common argument routines
 
 extension DarwinToolchain {
-    func addArgsToLinkStdlib(
-      to commandLine: inout [Job.ArgTemplate],
-      parsedOptions: inout ParsedOptions,
-      sdkPath: String?,
-      targetTriple: Triple
-    ) throws {
+  func addArgsToLinkStdlib(
+    to commandLine: inout [Job.ArgTemplate],
+    parsedOptions: inout ParsedOptions,
+    sdkPath: String?,
+    targetInfo: FrontendTargetInfo,
+    linkerOutputType: LinkOutputType,
+    fileSystem: FileSystem
+  ) throws {
+    let targetTriple = targetInfo.target.triple
 
-      // Link compatibility libraries, if we're deploying back to OSes that
-      // have an older Swift runtime.
-  //    let sharedResourceDirPath = try computeResourceDirPath(for: targetTriple,
-  //                                                           isShared: true)
-  //    Optional<llvm::VersionTuple> runtimeCompatibilityVersion;
-  //
-  //    if (context.Args.hasArg(options::OPT_runtime_compatibility_version)) {
-  //      auto value = context.Args.getLastArgValue(
-  //                                      options::OPT_runtime_compatibility_version);
-  //      if (value.equals("5.0")) {
-  //        runtimeCompatibilityVersion = llvm::VersionTuple(5, 0);
-  //      } else if (value.equals("none")) {
-  //        runtimeCompatibilityVersion = None;
-  //      } else {
-  //        // TODO: diagnose unknown runtime compatibility version?
-  //      }
-  //    } else if (job.getKind() == LinkKind::Executable) {
-  //      runtimeCompatibilityVersion
-  //                     = getSwiftRuntimeCompatibilityVersionForTarget(getTriple());
-  //    }
-  //
-  //    if (runtimeCompatibilityVersion) {
-  //      if (*runtimeCompatibilityVersion <= llvm::VersionTuple(5, 0)) {
-  //        // Swift 5.0 compatibility library
-  //        SmallString<128> BackDeployLib;
-  //        BackDeployLib.append(SharedResourceDirPath);
-  //        llvm::sys::path::append(BackDeployLib, "libswiftCompatibility50.a");
-  //
-  //        if (llvm::sys::fs::exists(BackDeployLib)) {
-  //          Arguments.push_back("-force_load");
-  //          Arguments.push_back(context.Args.MakeArgString(BackDeployLib));
-  //        }
-  //      }
-  //    }
-  //
-  //    if (job.getKind() == LinkKind::Executable) {
-  //      if (runtimeCompatibilityVersion)
-  //        if (*runtimeCompatibilityVersion <= llvm::VersionTuple(5, 0)) {
-  //          // Swift 5.0 dynamic replacement compatibility library.
-  //          SmallString<128> BackDeployLib;
-  //          BackDeployLib.append(SharedResourceDirPath);
-  //          llvm::sys::path::append(BackDeployLib,
-  //                                  "libswiftCompatibilityDynamicReplacements.a");
-  //
-  //          if (llvm::sys::fs::exists(BackDeployLib)) {
-  //            Arguments.push_back("-force_load");
-  //            Arguments.push_back(context.Args.MakeArgString(BackDeployLib));
-  //          }
-  //        }
-  //    }
+    // Link compatibility libraries, if we're deploying back to OSes that
+    // have an older Swift runtime.
+    let runtimeCompatibilityVersion: (Int, Int)? =
+          targetInfo.target.swiftRuntimeCompatibilityVersion.map {
+            ($0.major, $0.minor)
+          }
 
-      // Add the runtime library link path, which is platform-specific and found
-      // relative to the compiler.
-      let runtimePaths = try runtimeLibraryPaths(
-        for: targetTriple,
-        parsedOptions: &parsedOptions,
-        sdkPath: sdkPath,
-        isShared: true
-      )
-      for path in runtimePaths {
-        commandLine.appendFlag(.L)
-        commandLine.appendPath(path)
-      }
-
-      let rpaths = StdlibRpathRule(
-        parsedOptions: &parsedOptions,
-        targetTriple: targetTriple
-      )
-      for path in rpaths.paths(runtimeLibraryPaths: runtimePaths) {
-        commandLine.appendFlag("-rpath")
-        commandLine.appendPath(path)
+    let resourceDirPath = try computeResourceDirPath(for: targetTriple,
+                                                     parsedOptions: &parsedOptions,
+                                                     isShared: true)
+    func addArgsForBackDeployLib(_ libName: String) {
+      let backDeployLibPath = resourceDirPath.appending(component: libName)
+      if fileSystem.exists(backDeployLibPath) {
+        commandLine.append(.flag("-force_load"))
+        commandLine.appendPath(backDeployLibPath)
       }
     }
+
+    if let compatibilityVersion = runtimeCompatibilityVersion {
+      if compatibilityVersion <= (5, 0) {
+        // Swift 5.0 compatibility library
+        addArgsForBackDeployLib("libswiftCompatibility50.a")
+      }
+
+      if compatibilityVersion <= (5, 1) {
+        // Swift 5.1 compatibility library
+        addArgsForBackDeployLib("libswiftCompatibility51.a")
+      }
+
+      if linkerOutputType == .executable && compatibilityVersion <= (5, 0) {
+        // Swift 5.0 dynamic replacement compatibility library.
+        addArgsForBackDeployLib("libswiftCompatibilityDynamicReplacements.a")
+      }
+    }
+
+    // Add the runtime library link path, which is platform-specific and found
+    // relative to the compiler.
+    let runtimePaths = try runtimeLibraryPaths(
+      for: targetTriple,
+      parsedOptions: &parsedOptions,
+      sdkPath: sdkPath,
+      isShared: true
+    )
+    for path in runtimePaths {
+      commandLine.appendFlag(.L)
+      commandLine.appendPath(path)
+    }
+
+    let rpaths = StdlibRpathRule(
+      parsedOptions: &parsedOptions,
+      targetInfo: targetInfo
+    )
+    for path in rpaths.paths(runtimeLibraryPaths: runtimePaths) {
+      commandLine.appendFlag("-rpath")
+      commandLine.appendPath(path)
+    }
+  }
 
   /// Represents the rpaths we need to add in order to find the
   /// desired standard library at runtime.
@@ -215,13 +203,13 @@ extension DarwinToolchain {
     /// Do not add any rpaths at all.
     case none
 
-    /// Determines the appropriate rule for the
-    init(parsedOptions: inout ParsedOptions, targetTriple: Triple) {
+    /// Determines the appropriate rule for the given set of options.
+    init(parsedOptions: inout ParsedOptions, targetInfo: FrontendTargetInfo) {
       if parsedOptions.hasFlag(
         positive: .toolchainStdlibRpath,
         negative: .noToolchainStdlibRpath,
         default: false
-      ) {
+        ) {
         // If the user has explicitly asked for a toolchain stdlib, we should
         // provide one using -rpath. This used to be the default behaviour but it
         // was considered annoying in at least the SwiftPM scenario (see
@@ -231,8 +219,8 @@ extension DarwinToolchain {
         // stdlibs will be able to link to the stdlib bundled in that toolchain.
         self = .toolchain
       }
-      else if targetTriple.supports(.swiftInTheOS) ||
-          parsedOptions.hasArgument(.noStdlibRpath) {
+      else if !targetInfo.target.librariesRequireRPath ||
+        parsedOptions.hasArgument(.noStdlibRpath) {
         // If targeting an OS with Swift in /usr/lib/swift, the LC_ID_DYLIB
         // install_name the stdlib will be an absolute path like
         // /usr/lib/swift/libswiftCore.dylib, and we do not need to provide an rpath

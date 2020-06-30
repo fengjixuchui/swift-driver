@@ -7,8 +7,10 @@
 # See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 
 add_library(SwiftDriver
-  "Dependency Scanning/ModuleDependencyBuildGeneration.swift"
-  "Dependency Scanning/InterModuleDependencyGraph.swift"
+  "Explicit Module Builds/ClangModuleBuildJobCache.swift"
+  "Explicit Module Builds/ExplicitModuleBuildHandler.swift"   
+  "Explicit Module Builds/InterModuleDependencyGraph.swift"
+  "Explicit Module Builds/ModuleDependencyScanning.swift"
 
   Driver/CompilerMode.swift
   Driver/DebugInfo.swift
@@ -17,9 +19,10 @@ add_library(SwiftDriver
   Driver/ModuleOutputInfo.swift
   Driver/OutputFileMap.swift
   Driver/ToolExecutionDelegate.swift
-  Driver/ModuleDependencyScanning.swift
 
-  Execution/JobExecutor.swift
+  Execution/ArgsResolver.swift
+  Execution/MultiJobExecutor.swift
+  Execution/DriverExecutor.swift
   Execution/ParsableOutput.swift
   Execution/ProcessProtocol.swift
   Execution/llbuild.swift
@@ -45,6 +48,7 @@ add_library(SwiftDriver
   Jobs/LinkJob.swift
   Jobs/MergeModuleJob.swift
   Jobs/Planning.swift
+  Jobs/PrintTargetInfoJob.swift
   Jobs/ReplJob.swift
   Jobs/Toolchain+InterpreterSupport.swift
   Jobs/Toolchain+LinkerSupport.swift

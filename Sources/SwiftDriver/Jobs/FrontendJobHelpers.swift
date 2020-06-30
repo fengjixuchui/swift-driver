@@ -70,11 +70,7 @@ extension Driver {
     // May also be used for generation of the dependency graph itself in ExplicitModuleBuild mode.
     if (parsedOptions.contains(.driverExplicitModuleBuild) &&
           moduleDependencyGraphUse == .computed) {
-      guard let dependencyGraph = interModuleDependencyGraph else {
-        fatalError("Attempting to add Explicit Module job dependencies, but the Inter Module Dependency Graph does not exist.")
-      }
-      try addExplicitModuleBuildArguments(dependencyGraph: dependencyGraph,
-                                          commandLine: &commandLine, inputs: &inputs)
+      try addExplicitModuleBuildArguments(inputs: &inputs, commandLine: &commandLine)
     }
 
     if let variant = parsedOptions.getLastArgument(.targetVariant)?.asSingle {
@@ -168,8 +164,9 @@ extension Driver {
     try commandLine.appendLast(.printEducationalNotes, from: &parsedOptions)
     try commandLine.appendAll(.D, from: &parsedOptions)
     try commandLine.appendAll(.sanitizeEQ, from: &parsedOptions)
-    try commandLine.appendAllArguments(.debugPrefixMap, from: &parsedOptions)
+    try commandLine.appendAll(.debugPrefixMap, from: &parsedOptions)
     try commandLine.appendAllArguments(.Xfrontend, from: &parsedOptions)
+    try commandLine.appendAll(.coveragePrefixMap, from: &parsedOptions)
 
     if let workingDirectory = workingDirectory {
       // Add -Xcc -working-directory before any other -Xcc options to ensure it is
@@ -180,6 +177,11 @@ extension Driver {
       commandLine.appendFlag(.Xcc)
       commandLine.appendPath(.absolute(workingDirectory))
     }
+
+    // Resource directory.
+    commandLine.appendFlag(.resourceDir)
+    commandLine.appendPath(
+      try AbsolutePath(validating: frontendTargetInfo.paths.runtimeResourcePath))
 
     // -g implies -enable-anonymous-context-mangled-names, because the extra
     // metadata aids debugging.
@@ -273,6 +275,11 @@ extension Driver {
             input: input,
             flag: "-emit-module-doc-path")
         addOutputOfType(
+            outputType: .swiftSourceInfoFile,
+            finalOutputPath: moduleSourceInfoPath,
+            input: input,
+            flag: "-emit-module-source-info")
+        addOutputOfType(
             outputType: .dependencies,
             finalOutputPath: dependenciesFilePath,
             input: input,
@@ -328,61 +335,13 @@ extension Driver {
     return outputs
   }
 
-  /// Adds the specified module as an explicit module dependency to given
-  /// inputs and command line arguments of a compile job.
-  /// Also adds transitive dependencies that arise from dependencies of this module.
-  func addModuleAsExplicitDependency(moduleInfo: ModuleInfo,
-                                     dependencyGraph: InterModuleDependencyGraph,
-                                     commandLine: inout [Job.ArgTemplate],
-                                     inputs: inout [TypedVirtualPath]) throws {
-    switch moduleInfo.details {
-      case .swift:
-        let swiftModulePath = TypedVirtualPath(file: try VirtualPath(path: moduleInfo.modulePath),
-                                               type: .swiftModule)
-        commandLine.appendFlags("-swift-module-file")
-        commandLine.appendPath(swiftModulePath.file)
-        inputs.append(swiftModulePath)
-      case .clang(let clangDependencyDetails):
-        let clangModulePath = TypedVirtualPath(file: try VirtualPath(path: moduleInfo.modulePath),
-                                               type: .pcm)
-        let clangModuleMapPath = TypedVirtualPath(file: try VirtualPath(path: clangDependencyDetails.moduleMapPath),
-                                                  type: .pcm)
-        commandLine.appendFlags("-Xcc", "-Xclang", "-Xcc",
-                                "-fmodule-map-file=\(clangModuleMapPath.file.description)")
-        commandLine.appendFlags("-Xcc", "-Xclang", "-Xcc",
-                                "-fmodule-file=\(clangModulePath.file.description)")
-        inputs.append(clangModulePath)
-        inputs.append(clangModuleMapPath)
-    }
-    // Add transitive dependencies to the command line as well
-    for transitiveDependencyId in moduleInfo.directDependencies {
-      guard let transitiveDependencyInfo = dependencyGraph.modules[transitiveDependencyId] else {
-        throw Error.missingModuleDependency(transitiveDependencyId.moduleName)
-      }
-      try addModuleAsExplicitDependency(moduleInfo: transitiveDependencyInfo,
-                                        dependencyGraph: dependencyGraph,
-                                        commandLine: &commandLine,
-                                        inputs: &inputs)
-    }
-  }
-
   /// Adds all dependecies required for an explicit module build
   /// to inputs and comman line arguments of a compile job.
-  func addExplicitModuleBuildArguments(dependencyGraph: InterModuleDependencyGraph,
-                                       commandLine: inout [Job.ArgTemplate],
-                                       inputs: inout [TypedVirtualPath]) throws {
-    // Prohibit the frontend from implicitly building textual modules into binary modules.
-    commandLine.appendFlags("-disable-implicit-swift-modules", "-Xcc", "-Xclang", "-Xcc",
-                            "-fno-implicit-modules")
-
-    // Provide the frontend with a list of explicitly pre-built modules.
-    for (moduleId, moduleInfo) in dependencyGraph.modules {
-      // Skip the main output module as it is not its own dependency
-      guard moduleId.moduleName != dependencyGraph.mainModuleName else {
-        continue
-      }
-      try addModuleAsExplicitDependency(moduleInfo: moduleInfo, dependencyGraph: dependencyGraph,
-                                        commandLine: &commandLine, inputs: &inputs)
+  func addExplicitModuleBuildArguments(inputs: inout [TypedVirtualPath],
+                                       commandLine: inout [Job.ArgTemplate]) throws {
+    guard var handler = explicitModuleBuildHandler else {
+      fatalError("No handler in Explicit Module Build mode.")
     }
+    try handler.resolveMainModuleDependencies(inputs: &inputs, commandLine: &commandLine)
   }
 }

@@ -28,13 +28,15 @@ public enum Tool {
 /// Describes a toolchain, which includes information about compilers, linkers
 /// and other tools required to build Swift code.
 public protocol Toolchain {
-  init(env: [String: String], fileSystem: FileSystem)
+  init(env: [String: String], executor: DriverExecutor, fileSystem: FileSystem)
 
   var env: [String: String] { get }
 
   var fileSystem: FileSystem { get }
 
   var searchPaths: [AbsolutePath] { get }
+
+  var executor: DriverExecutor { get }
 
   /// Retrieve the absolute path to a particular tool.
   func getToolPath(_ tool: Tool) throws -> AbsolutePath
@@ -43,7 +45,7 @@ public protocol Toolchain {
   func overrideToolPath(_ tool: Tool, path: AbsolutePath)
 
   /// Returns path of the default SDK, if there is one.
-  func defaultSDKPath() throws -> AbsolutePath?
+  func defaultSDKPath(_ target: Triple?) throws -> AbsolutePath?
 
   /// When the compiler invocation should be stored in debug information.
   var shouldStoreInvocationInDebugInfo: Bool { get }
@@ -60,8 +62,7 @@ public protocol Toolchain {
     outputFile: VirtualPath,
     sdkPath: String?,
     sanitizers: Set<Sanitizer>,
-    targetTriple: Triple,
-    targetVariantTriple: Triple?
+    targetInfo: FrontendTargetInfo
   ) throws -> AbsolutePath
 
   func runtimeLibraryName(
@@ -83,19 +84,10 @@ extension Toolchain {
   }
 
   public func swiftCompilerVersion() throws -> String {
-    try Process.checkNonZeroExit(
+    try executor.checkNonZeroExit(
       args: getToolPath(.swiftCompiler).pathString, "-version",
       environment: env
     ).split(separator: "\n").first.map(String.init) ?? ""
-  }
-
-  /// Returns the target triple string for the current host.
-  public func hostTargetTriple() throws -> Triple {
-    let triple = try Process.checkNonZeroExit(
-      args: getToolPath(.clang).pathString, "-print-target-triple",
-      environment: env
-    ).spm_chomp()
-    return Triple(triple)
   }
 
   /// Returns the `executablePath`'s directory.
@@ -114,7 +106,10 @@ extension Toolchain {
 
   /// - Returns: String in the form of: `SWIFT_DRIVER_TOOLNAME_EXEC`
   private func envVarName(for toolName: String) -> String {
-    return "SWIFT_DRIVER_\(toolName.uppercased())_EXEC"
+    let lookupName = toolName
+      .replacingOccurrences(of: "-", with: "_")
+      .uppercased()
+    return "SWIFT_DRIVER_\(lookupName)_EXEC"
   }
 
   /// Use this property only for testing purposes, for example,
@@ -137,6 +132,9 @@ extension Toolchain {
       return path
     } else if let path = lookupExecutablePath(filename: executable, searchPaths: searchPaths) {
       return path
+    } else if executable == "swift-frontend" {
+      // Temporary shim: fall back to looking for "swift" before failing.
+      return try lookup(executable: "swift")
     } else if fallbackToExecutableDefaultPath {
       return AbsolutePath("/usr/bin/" + executable)
     } else {
@@ -150,14 +148,14 @@ extension Toolchain {
       throw ToolchainError.unableToFind(tool: xcrun)
     }
 
-    let path = try Process.checkNonZeroExit(
-      arguments: [xcrun, "-sdk", "macosx", "--find", executable],
+    let path = try executor.checkNonZeroExit(
+      args: xcrun, "--find", executable,
       environment: env
     ).spm_chomp()
     return AbsolutePath(path)
   }
 }
 
-fileprivate enum ToolchainError: Swift.Error {
+public enum ToolchainError: Swift.Error {
   case unableToFind(tool: String)
 }

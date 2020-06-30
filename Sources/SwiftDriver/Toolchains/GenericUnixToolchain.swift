@@ -15,14 +15,18 @@ import TSCBasic
 public final class GenericUnixToolchain: Toolchain {
   public let env: [String: String]
 
+  /// The executor used to run processes used to find tools and retrieve target info.
+  public let executor: DriverExecutor
+
   /// The file system to use for queries.
   public let fileSystem: FileSystem
 
   /// Doubles as path cache and point for overriding normal lookup
   private var toolPaths = [Tool: AbsolutePath]()
 
-  public init(env: [String: String], fileSystem: FileSystem = localFileSystem) {
+  public init(env: [String: String], executor: DriverExecutor, fileSystem: FileSystem = localFileSystem) {
     self.env = env
+    self.executor = executor
     self.fileSystem = fileSystem
   }
 
@@ -49,7 +53,7 @@ public final class GenericUnixToolchain: Toolchain {
   private func lookupToolPath(_ tool: Tool) throws -> AbsolutePath {
     switch tool {
     case .swiftCompiler:
-      return try lookup(executable: "swift")
+      return try lookup(executable: "swift-frontend")
     case .staticLinker:
       return try lookup(executable: "ar")
     case .dynamicLinker:
@@ -74,7 +78,7 @@ public final class GenericUnixToolchain: Toolchain {
     toolPaths[tool] = path
   }
 
-  public func defaultSDKPath() throws -> AbsolutePath? {
+  public func defaultSDKPath(_ target: Triple?) throws -> AbsolutePath? {
     return nil
   }
 

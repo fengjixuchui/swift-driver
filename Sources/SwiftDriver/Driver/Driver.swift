@@ -24,8 +24,10 @@ public struct Driver {
     case subcommandPassedToDriver
     case integratedReplRemoved
     case conflictingOptions(Option, Option)
+    case unableToLoadOutputFileMap(String)
     // Explicit Module Build Failures
     case malformedModuleDependency(String, String)
+    case missingPCMArguments(String)
     case missingModuleDependency(String)
     case dependencyScanningFailure(Int, String)
 
@@ -49,10 +51,14 @@ public struct Driver {
       // Explicit Module Build Failures
       case .malformedModuleDependency(let moduleName, let errorDescription):
         return "Malformed Module Dependency: \(moduleName), \(errorDescription)"
+      case .missingPCMArguments(let moduleName):
+        return "Missing extraPcmArgs to build Clang module: \(moduleName)"
       case .missingModuleDependency(let moduleName):
         return "Missing Module Dependency Info: \(moduleName)"
       case .dependencyScanningFailure(let code, let error):
         return "Module Dependency Scanner returned with non-zero exit status: \(code), \(error)"
+      case .unableToLoadOutputFileMap(let path):
+        return "unable to load output file map '\(path)': no such file or directory"
       }
     }
   }
@@ -68,14 +74,22 @@ public struct Driver {
   /// Diagnostic engine for emitting warnings, errors, etc.
   public let diagnosticEngine: DiagnosticsEngine
 
-  /// The target triple.
-  public let targetTriple: Triple
-
-  /// The variant target triple.
-  public let targetVariantTriple: Triple?
+  /// The executor the driver uses to run jobs.
+  public let executor: DriverExecutor
 
   /// The toolchain to use for resolution.
   public let toolchain: Toolchain
+
+  /// Information about the target, as reported by the Swift frontend.
+  let frontendTargetInfo: FrontendTargetInfo
+
+  /// The target triple.
+  public var targetTriple: Triple { frontendTargetInfo.target.triple }
+
+  /// The variant target triple.
+  public var targetVariantTriple: Triple? {
+    frontendTargetInfo.targetVariant?.triple
+  }
 
   /// The kind of driver.
   public let driverKind: DriverKind
@@ -129,7 +143,9 @@ public struct Driver {
   public let incrementalCompilation: IncrementalCompilation
 
   /// The path of the SDK.
-  public let sdkPath: String?
+  public var sdkPath: String? {
+    frontendTargetInfo.paths.sdkPath
+  }
 
   /// The path to the imported Objective-C header.
   public let importedObjCHeader: VirtualPath?
@@ -164,15 +180,18 @@ public struct Driver {
   /// Path to the optimization record.
   public let optimizationRecordPath: VirtualPath?
 
+  /// Path to the Swift module source information file.
+  public let moduleSourceInfoPath: VirtualPath?
+
   /// If the driver should force emit module in a single invocation.
   ///
   /// This will force the driver to first emit the module and then run compile jobs.
   public var forceEmitModuleInSingleInvocation: Bool = false
 
-  /// The module dependency graph, which is populated during the planning phase
-  /// only when all modules will be prebuilt and treated as explicit by the
-  /// various compilation jobs.
-  var interModuleDependencyGraph: InterModuleDependencyGraph? = nil
+  /// Handler for constructing module build jobs using Explicit Module Builds.
+  /// Constructed during the planning phase only when all modules will be prebuilt and treated
+  /// as explicit by the various compilation jobs.
+  public var explicitModuleBuildHandler: ExplicitModuleBuildHandler? = nil
 
   /// Handler for emitting diagnostics to stderr.
   public static let stderrDiagnosticsHandler: DiagnosticsEngine.DiagnosticsHandler = { diagnostic in
@@ -206,16 +225,23 @@ public struct Driver {
   ///   in production, you should use the default argument, which copies the current environment.
   /// - Parameter diagnosticsHandler: A callback executed when a diagnostic is
   ///   emitted. The default argument prints diagnostics to stderr.
+  /// - Parameter executor: Used by the driver to execute jobs. The default argument
+  /// is present to streamline testing, it shouldn't be used in production.
   public init(
     args: [String],
     env: [String: String] = ProcessEnv.vars,
     diagnosticsEngine: DiagnosticsEngine = DiagnosticsEngine(handlers: [Driver.stderrDiagnosticsHandler]),
-    fileSystem: FileSystem = localFileSystem
+    fileSystem: FileSystem = localFileSystem,
+    executor: DriverExecutor? = nil
   ) throws {
     self.env = env
     self.fileSystem = fileSystem
 
     self.diagnosticEngine = diagnosticsEngine
+    self.executor = try executor ?? SwiftDriverExecutor(diagnosticsEngine: diagnosticsEngine,
+                                                        processSet: ProcessSet(),
+                                                        fileSystem: fileSystem,
+                                                        env: env)
 
     if case .subcommand = try Self.invocationRunMode(forArgs: args).mode {
       throw Error.subcommandPassedToDriver
@@ -227,27 +253,15 @@ public struct Driver {
     self.optionTable = OptionTable()
     self.parsedOptions = try optionTable.parse(Array(args), for: self.driverKind)
 
-    let explicitTarget = (self.parsedOptions.getLastArgument(.target)?.asSingle)
-      .map {
-        Triple($0, normalizing: true)
-      }
-    (self.toolchain, self.targetTriple) = try Self.computeToolchain(explicitTarget, diagnosticsEngine: diagnosticEngine, env: env, fileSystem: fileSystem)
-    self.targetVariantTriple = self.parsedOptions.getLastArgument(.targetVariant).map { Triple($0.asSingle, normalizing: true) }
+    // Determine the compilation mode.
+    self.compilerMode = try Self.computeCompilerMode(&parsedOptions, driverKind: driverKind, diagnosticsEngine: diagnosticEngine)
 
-    // Find the Swift compiler executable.
-    if let frontendPath = self.parsedOptions.getLastArgument(.driverUseFrontendPath) {
-      var frontendCommandLine = frontendPath.asSingle.split(separator: ";").map { String($0) }
-      if frontendCommandLine.isEmpty {
-        self.diagnosticEngine.emit(.error_no_swift_frontend)
-        self.swiftCompilerPrefixArgs = []
-      } else {
-        let frontendPath = frontendCommandLine.removeFirst()
-        self.toolchain.overrideToolPath(.swiftCompiler, path: try AbsolutePath(validating: frontendPath))
-        self.swiftCompilerPrefixArgs = frontendCommandLine
-      }
-    } else {
-      self.swiftCompilerPrefixArgs = []
-    }
+    // Build the toolchain and determine target information.
+    (self.toolchain, self.frontendTargetInfo, self.swiftCompilerPrefixArgs) =
+        try Self.computeToolchain(
+          &self.parsedOptions, diagnosticsEngine: diagnosticEngine,
+          compilerMode: self.compilerMode, env: env,
+          executor: self.executor, fileSystem: fileSystem)
 
     // Compute the working directory.
     workingDirectory = try parsedOptions.getLastArgument(.workingDirectory).map { workingDirectoryArg in
@@ -273,8 +287,12 @@ public struct Driver {
     let outputFileMap: OutputFileMap?
     // Initialize an empty output file map, which will be populated when we start creating jobs.
     if let outputFileMapArg = parsedOptions.getLastArgument(.outputFileMap)?.asSingle {
-      let path = try VirtualPath(path: outputFileMapArg)
+      do {
+        let path = try VirtualPath(path: outputFileMapArg)
         outputFileMap = try .load(fileSystem: fileSystem, file: path, diagnosticEngine: diagnosticEngine)
+      } catch {
+        throw Error.unableToLoadOutputFileMap(outputFileMapArg)
+      }
     } else {
       outputFileMap = nil
     }
@@ -285,9 +303,6 @@ public struct Driver {
       self.outputFileMap = outputFileMap
     }
 
-    // Determine the compilation mode.
-    self.compilerMode = try Self.computeCompilerMode(&parsedOptions, driverKind: driverKind, diagnosticsEngine: diagnosticEngine)
-
     // Figure out the primary outputs from the driver.
     (self.compilerOutputType, self.linkerOutputType) = Self.determinePrimaryOutputs(&parsedOptions, driverKind: driverKind, diagnosticsEngine: diagnosticEngine)
 
@@ -296,6 +311,7 @@ public struct Driver {
     self.numParallelJobs = Self.determineNumParallelJobs(&parsedOptions, diagnosticsEngine: diagnosticEngine, env: env)
 
     try Self.validateWarningControlArgs(&parsedOptions)
+    Self.validateCoverageArgs(&parsedOptions, diagnosticsEngine: diagnosticEngine)
 
     // Compute debug information output.
     self.debugInfo = Self.computeDebugInfo(&parsedOptions, diagnosticsEngine: diagnosticEngine)
@@ -318,7 +334,9 @@ public struct Driver {
       actualSwiftVersion: try? toolchain.swiftCompilerVersion()
     )
 
-    self.sdkPath = Self.computeSDKPath(&parsedOptions, compilerMode: compilerMode, toolchain: toolchain, fileSystem: fileSystem, diagnosticsEngine: diagnosticEngine, env: env)
+    // Local variable to alias the target triple, because self.targetTriple
+    // is not available until the end of this initializer.
+    let targetTriple = self.frontendTargetInfo.target.triple
 
     self.importedObjCHeader = try Self.computeImportedObjCHeader(&parsedOptions, compilerMode: compilerMode, diagnosticEngine: diagnosticEngine)
     self.bridgingPrecompiledHeader = try Self.computeBridgingPrecompiledHeader(&parsedOptions,
@@ -393,6 +411,14 @@ public struct Driver {
         &parsedOptions, type: .optimizationRecord,
         isOutput: .saveOptimizationRecord,
         outputPath: .saveOptimizationRecordPath,
+        compilerOutputType: compilerOutputType,
+        compilerMode: compilerMode,
+        outputFileMap: self.outputFileMap,
+        moduleName: moduleOutputInfo.name)
+    self.moduleSourceInfoPath = try Self.computeSupplementaryOutputPath(
+        &parsedOptions, type: .swiftSourceInfoFile,
+        isOutput: .emitModuleSourceInfo,
+        outputPath: .emitModuleSourceInfoPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
@@ -599,10 +625,7 @@ extension Driver {
 
   /// Run the driver.
   public mutating func run(
-    jobs: [Job],
-    resolver: ArgsResolver,
-    executorDelegate: JobExecutorDelegate? = nil,
-    processSet: ProcessSet? = nil
+    jobs: [Job]
   ) throws {
     // We just need to invoke the corresponding tool if the kind isn't Swift compiler.
     guard driverKind.isSwiftCompiler else {
@@ -625,14 +648,17 @@ extension Driver {
     // If we're only supposed to print the jobs, do so now.
     if parsedOptions.contains(.driverPrintJobs) {
       for job in jobs {
-        try Self.printJob(job, resolver: resolver, forceResponseFiles: forceResponseFiles)
+        // FIXME: We shouldn't be constructing an ArgsResolver here.
+        try Self.printJob(job,
+                          resolver: try ArgsResolver(fileSystem: fileSystem),
+                          forceResponseFiles: forceResponseFiles)
       }
       return
     }
 
     if parsedOptions.contains(.driverPrintBindings) {
       for job in jobs {
-        try printBindings(job)
+        printBindings(job)
       }
       return
     }
@@ -648,23 +674,24 @@ extension Driver {
       // Only one job and no cleanup required
       || (jobs.count == 1 && !parsedOptions.hasArgument(.parseableOutput)) {
       assert(jobs.count == 1, "Cannot execute in place for multi-job build plans")
-      return try executeJobInPlace(jobs[0], resolver: resolver, forceResponseFiles: forceResponseFiles)
+      var job = jobs[0]
+      // Require in-place execution for all single job plans.
+      job.requiresInPlaceExecution = true
+      try executor.execute(job: job,
+                           forceResponseFiles: forceResponseFiles,
+                           recordedInputModificationDates: recordedInputModificationDates)
+      return
     }
 
     // Create and use the tool execution delegate if one is not provided explicitly.
-    let executorDelegate = executorDelegate ?? createToolExecutionDelegate()
+    let executorDelegate = createToolExecutionDelegate()
 
-    // Start up an executor and perform the build.
-    let jobExecutor = JobExecutor(
-        jobs: jobs, resolver: resolver,
-        executorDelegate: executorDelegate,
-        diagnosticsEngine: diagnosticEngine,
-        numParallelJobs: numParallelJobs,
-        processSet: processSet,
-        forceResponseFiles: forceResponseFiles,
-        recordedInputModificationDates: recordedInputModificationDates
-    )
-    try jobExecutor.execute(env: env, fileSystem: fileSystem)
+    // Perform the build
+    try executor.execute(jobs: jobs,
+                         delegate: executorDelegate,
+                         numParallelJobs: numParallelJobs ?? 1,
+                         forceResponseFiles: forceResponseFiles,
+                         recordedInputModificationDates: recordedInputModificationDates)
   }
 
   public mutating func createToolExecutionDelegate() -> ToolExecutionDelegate {
@@ -678,19 +705,6 @@ extension Driver {
     }
 
     return ToolExecutionDelegate(mode: mode)
-  }
-
-  /// Execute a single job in-place.
-  private func executeJobInPlace(_ job: Job, resolver: ArgsResolver, forceResponseFiles: Bool) throws {
-    let arguments: [String] = try resolver.resolveArgumentList(for: job, forceResponseFiles: forceResponseFiles)
-
-    for (envVar, value) in job.extraEnvironment {
-      try ProcessEnv.setVar(envVar, value: value)
-    }
-
-    try job.verifyInputsNotModified(since: self.recordedInputModificationDates, fileSystem: fileSystem)
-
-    return try exec(path: arguments[0], args: arguments)
   }
 
   public static func printJob(_ job: Job, resolver: ArgsResolver, forceResponseFiles: Bool) throws {
@@ -711,8 +725,8 @@ extension Driver {
     print(result)
   }
 
-  private func printBindings(_ job: Job) throws {
-    try stdoutStream <<< #"# ""# <<< toolchain.hostTargetTriple().triple
+  private func printBindings(_ job: Job) {
+    stdoutStream <<< #"# ""# <<< targetTriple.triple
     stdoutStream <<< #"" - ""# <<< job.tool.basename
     stdoutStream <<< #"", inputs: ["#
     stdoutStream <<< job.inputs.map { "\"" + $0.file.name + "\"" }.joined(separator: ", ")
@@ -727,7 +741,7 @@ extension Driver {
   }
 
   private func printVersion<S: OutputByteStream>(outputStream: inout S) throws {
-    outputStream.write(try Process.checkNonZeroExit(args: toolchain.getToolPath(.swiftCompiler).pathString, "--version"))
+    outputStream.write(try executor.checkNonZeroExit(args: toolchain.getToolPath(.swiftCompiler).pathString, "--version", environment: env))
     outputStream.flush()
   }
 }
@@ -1079,6 +1093,14 @@ extension Driver {
   private static func computeDebugInfo(_ parsedOptions: inout ParsedOptions, diagnosticsEngine: DiagnosticsEngine) -> DebugInfo {
     var shouldVerify = parsedOptions.hasArgument(.verifyDebugInfo)
 
+    for debugPrefixMap in parsedOptions.arguments(for: .debugPrefixMap) {
+      let value = debugPrefixMap.argument.asSingle
+      let parts = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      if parts.count != 2 {
+        diagnosticsEngine.emit(.error_opt_invalid_mapping(option: debugPrefixMap.option, value: value))
+      }
+    }
+
     // Determine the debug level.
     let level: DebugInfo.Level?
     if let levelOption = parsedOptions.getLast(in: .g), levelOption.option != .gnone {
@@ -1362,7 +1384,10 @@ extension Driver {
     } else if moduleOutputKind == .topLevel {
       // FIXME: Logic to infer from primary outputs, etc.
       let moduleFilename = moduleName.appendingFileTypeExtension(.swiftModule)
-      if let outputArg = parsedOptions.getLastArgument(.o)?.asSingle, let lastSeparatorIndex = outputArg.lastIndex(of: "/") {
+      if let outputArg = parsedOptions.getLastArgument(.o)?.asSingle, compilerOutputType == .swiftModule {
+        // If the module is the primary output, match -o exactly if present.
+        moduleOutputPath = try .init(path: outputArg)
+      } else if let outputArg = parsedOptions.getLastArgument(.o)?.asSingle, let lastSeparatorIndex = outputArg.lastIndex(of: "/") {
         // Put the module next to the top-level output.
         moduleOutputPath = try .init(path: outputArg[outputArg.startIndex...lastSeparatorIndex] + moduleFilename)
       } else {
@@ -1388,10 +1413,11 @@ extension Driver {
     _ parsedOptions: inout ParsedOptions,
     compilerMode: CompilerMode,
     toolchain: Toolchain,
+    targetTriple: Triple?,
     fileSystem: FileSystem,
     diagnosticsEngine: DiagnosticsEngine,
     env: [String: String]
-  ) -> String? {
+  ) -> VirtualPath? {
     var sdkPath: String?
 
     if let arg = parsedOptions.getLastArgument(.sdk) {
@@ -1399,14 +1425,8 @@ extension Driver {
     } else if let SDKROOT = env["SDKROOT"] {
       sdkPath = SDKROOT
     } else if compilerMode == .immediate || compilerMode == .repl {
-      let triple = try? toolchain.hostTargetTriple()
-      if triple?.isMacOSX == true {
-        // In immediate modes, use the SDK provided by xcrun.
-        // This will prefer the SDK alongside the Swift found by "xcrun swift".
-        // We don't do this in compilation modes because defaulting to the
-        // latest SDK may not be intended.
-        sdkPath = try? toolchain.defaultSDKPath()?.pathString
-      }
+      // In immediate modes, query the toolchain for a default SDK.
+      sdkPath = try? toolchain.defaultSDKPath(targetTriple)?.pathString
     }
 
     // An empty string explicitly clears the SDK.
@@ -1428,16 +1448,18 @@ extension Driver {
         path = AbsolutePath(sdkPath, relativeTo: cwd)
       } else {
         diagnosticsEngine.emit(.warning_no_such_sdk(sdkPath))
-        return sdkPath
+        return nil
       }
 
       if !fileSystem.exists(path) {
         diagnosticsEngine.emit(.warning_no_such_sdk(sdkPath))
       }
       // .. else check if SDK is too old (we need target triple to diagnose that).
+
+      return .absolute(path)
     }
 
-    return sdkPath
+    return nil
   }
 }
 
@@ -1504,6 +1526,16 @@ extension Driver {
       throw Error.conflictingOptions(.warningsAsErrors, .suppressWarnings)
     }
   }
+
+  private static func validateCoverageArgs(_ parsedOptions: inout ParsedOptions, diagnosticsEngine: DiagnosticsEngine) {
+    for coveragePrefixMap in parsedOptions.arguments(for: .coveragePrefixMap) {
+      let value = coveragePrefixMap.argument.asSingle
+      let parts = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      if parts.count != 2 {
+        diagnosticsEngine.emit(.error_opt_invalid_mapping(option: coveragePrefixMap.option, value: value))
+      }
+    }
+  }
 }
 
 extension Triple {
@@ -1535,15 +1567,83 @@ extension Driver {
   #endif
 
   static func computeToolchain(
-    _ explicitTarget: Triple?,
+    _ parsedOptions: inout ParsedOptions,
     diagnosticsEngine: DiagnosticsEngine,
+    compilerMode: CompilerMode,
     env: [String: String],
+    executor: DriverExecutor,
     fileSystem: FileSystem
-  ) throws -> (Toolchain, Triple) {
+  ) throws -> (Toolchain, FrontendTargetInfo, [String]) {
+    let explicitTarget = (parsedOptions.getLastArgument(.target)?.asSingle)
+      .map {
+        Triple($0, normalizing: true)
+      }
+    let explicitTargetVariant = (parsedOptions.getLastArgument(.targetVariant)?.asSingle)
+      .map {
+        Triple($0, normalizing: true)
+      }
+
+    // Determine the resource directory.
+    let resourceDirPath: VirtualPath?
+    if let resourceDirArg = parsedOptions.getLastArgument(.resourceDir) {
+      resourceDirPath = try VirtualPath(path: resourceDirArg.asSingle)
+    } else {
+      resourceDirPath = nil
+    }
+
     let toolchainType = try explicitTarget?.toolchainType(diagnosticsEngine) ??
           defaultToolchainType
-    let toolchain = toolchainType.init(env: env, fileSystem: fileSystem)
-    return (toolchain, try explicitTarget ?? toolchain.hostTargetTriple())
+    let toolchain = toolchainType.init(env: env, executor: executor, fileSystem: fileSystem)
+
+    // Find the Swift compiler executable.
+    let swiftCompilerPrefixArgs: [String]
+    if let frontendPath = parsedOptions.getLastArgument(.driverUseFrontendPath){
+      var frontendCommandLine =
+        frontendPath.asSingle.split(separator: ";").map { String($0) }
+      if frontendCommandLine.isEmpty {
+        diagnosticsEngine.emit(.error_no_swift_frontend)
+        swiftCompilerPrefixArgs = []
+      } else {
+        let frontendPath = frontendCommandLine.removeFirst()
+        toolchain.overrideToolPath(
+          .swiftCompiler, path: try AbsolutePath(validating: frontendPath))
+        swiftCompilerPrefixArgs = frontendCommandLine
+      }
+    } else {
+      swiftCompilerPrefixArgs = []
+    }
+
+    // Find the SDK, if any.
+    let sdkPath: VirtualPath? = Self.computeSDKPath(
+      &parsedOptions, compilerMode: compilerMode, toolchain: toolchain,
+      targetTriple: explicitTarget, fileSystem: fileSystem,
+      diagnosticsEngine: diagnosticsEngine, env: env)
+
+    // Query the frontend to for target information.
+    var info = try executor.execute(
+        job: toolchain.printTargetInfoJob(
+          target: explicitTarget, targetVariant: explicitTargetVariant,
+          sdkPath: sdkPath, resourceDirPath: resourceDirPath
+        ),
+        capturingJSONOutputAs: FrontendTargetInfo.self,
+        forceResponseFiles: false,
+        recordedInputModificationDates: [:])
+
+    // Parse the runtime compatibility version. If present, it will override
+    // what is reported by the frontend.
+    if let versionString =
+        parsedOptions.getLastArgument(.runtimeCompatibilityVersion)?.asSingle {
+      if let version = SwiftVersion(string: versionString) {
+        info.target.swiftRuntimeCompatibilityVersion = version
+        info.targetVariant?.swiftRuntimeCompatibilityVersion = version
+      } else {
+        diagnosticsEngine.emit(
+          .error_invalid_arg_value(
+            arg: .runtimeCompatibilityVersion, value: versionString))
+      }
+    }
+
+    return (toolchain, info, swiftCompilerPrefixArgs)
   }
 }
 

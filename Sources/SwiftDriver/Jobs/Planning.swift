@@ -66,7 +66,7 @@ extension Driver {
       if parsedOptions.contains(.driverPrintModuleDependenciesJobs) {
         let forceResponseFiles = parsedOptions.contains(.driverForceResponseFiles)
         for job in modulePrebuildJobs {
-          try Self.printJob(job, resolver: try ArgsResolver(),
+          try Self.printJob(job, resolver: try ArgsResolver(fileSystem: self.fileSystem),
                             forceResponseFiles: forceResponseFiles)
         }
       }
@@ -222,31 +222,32 @@ extension Driver {
   /// Prescan the source files to produce a module dependency graph and turn it into a set
   /// of jobs required to build all dependencies.
   public mutating func generateExplicitModuleBuildJobs() throws -> [Job] {
-    interModuleDependencyGraph = try computeModuleDependencyGraph()
-    guard let dependencyGraph = interModuleDependencyGraph else {
-      fatalError("Attempting to perform Explicit Module Build job generation, but the Inter Module Dependency Graph does not exist.")
-    }
-    return try planExplicitModuleDependenciesCompile(dependencyGraph: dependencyGraph)
+    let dependencyScannerJob = try dependencyScanningJob()
+    let forceResponseFiles = parsedOptions.hasArgument(.driverForceResponseFiles)
+
+    let dependencyGraph =
+      try self.executor.execute(job: dependencyScannerJob,
+                                capturingJSONOutputAs: InterModuleDependencyGraph.self,
+                                forceResponseFiles: forceResponseFiles,
+                                recordedInputModificationDates: recordedInputModificationDates)
+
+    explicitModuleBuildHandler = try ExplicitModuleBuildHandler(dependencyGraph: dependencyGraph,
+                                                                toolchain: toolchain)
+    return try explicitModuleBuildHandler!.generateExplicitModuleDependenciesBuildJobs()
   }
 
   /// Create a job if needed for simple requests that can be immediately
   /// forwarded to the frontend.
   public mutating func immediateForwardingJob() throws -> Job? {
     if parsedOptions.hasArgument(.printTargetInfo) {
-      var commandLine: [Job.ArgTemplate] = [.flag("-frontend"),
-                                            .flag("-print-target-info")]
-      try commandLine.appendLast(.target, from: &parsedOptions)
-      try commandLine.appendLast(.targetVariant, from: &parsedOptions)
-      try commandLine.appendLast(.sdk, from: &parsedOptions)
-      try commandLine.appendLast(.resourceDir, from: &parsedOptions)
-      return Job(
-        moduleName: moduleOutputInfo.name,
-        kind: .printTargetInfo,
-        tool: .absolute(try toolchain.getToolPath(.swiftCompiler)),
-        commandLine: commandLine,
-        inputs: [],
-        outputs: [],
-        requiresInPlaceExecution: true)
+      let sdkPath = try parsedOptions.getLastArgument(.sdk).map { try VirtualPath(path: $0.asSingle) }
+      let resourceDirPath = try parsedOptions.getLastArgument(.resourceDir).map { try VirtualPath(path: $0.asSingle) }
+      
+      return try toolchain.printTargetInfoJob(target: targetTriple,
+                                              targetVariant: targetVariantTriple,
+                                              sdkPath: sdkPath,
+                                              resourceDirPath: resourceDirPath,
+                                              requiresInPlaceExecution: true)
     }
 
     if parsedOptions.hasArgument(.version) || parsedOptions.hasArgument(.version_) {
