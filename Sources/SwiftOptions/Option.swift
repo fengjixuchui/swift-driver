@@ -28,6 +28,7 @@ public struct OptionAttributes: OptionSet, Hashable {
   public static let indent                        = OptionAttributes(rawValue: 0x100)
   public static let argumentIsPath                = OptionAttributes(rawValue: 0x200)
   public static let moduleInterface               = OptionAttributes(rawValue: 0x400)
+  public static let supplementaryOutput           = OptionAttributes(rawValue: 0x800)
 }
 
 /// Describes a command-line option.
@@ -133,20 +134,10 @@ extension Option {
   /// Whether this option is accepted by a driver of the given kind.
   public func isAccepted(by driverKind: DriverKind) -> Bool {
     switch driverKind {
-    case .autolinkExtract:
-      return attributes.contains(.autolinkExtract)
-
     case .batch:
       return !attributes.contains(.noBatch)
-
-    case .frontend:
-      return attributes.contains(.frontend)
-
     case .interactive:
       return !attributes.contains(.noInteractive)
-
-    case .moduleWrap:
-      return attributes.contains(.moduleWrap)
     }
   }
 }

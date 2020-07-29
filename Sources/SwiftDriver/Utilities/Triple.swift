@@ -1560,7 +1560,7 @@ extension Triple {
         version.minor = 4
       }
 
-      if version.major != 10 {
+      if version.major != 10 && version.major != 11 {
         return nil
       }
 
@@ -1634,7 +1634,7 @@ extension Triple {
 // MARK: - Catalyst
 
 extension Triple {
-  var isMacCatalyst: Bool {
+  @_spi(Testing) public var isMacCatalyst: Bool {
     return self.isiOS && !self.isTvOS && environment == .macabi
   }
 

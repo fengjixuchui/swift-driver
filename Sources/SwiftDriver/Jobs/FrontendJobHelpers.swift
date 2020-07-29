@@ -157,11 +157,14 @@ extension Driver {
     try commandLine.appendLast(.disableAstscopeLookup, from: &parsedOptions)
     try commandLine.appendLast(.disableParserLookup, from: &parsedOptions)
     try commandLine.appendLast(.sanitizeRecoverEQ, from: &parsedOptions)
-    try commandLine.appendLast(.enableFineGrainedDependencies, from: &parsedOptions)
     try commandLine.appendLast(.scanDependencies, from: &parsedOptions)
     try commandLine.appendLast(.fineGrainedDependencyIncludeIntrafile, from: &parsedOptions)
     try commandLine.appendLast(.enableExperimentalConcisePoundFile, from: &parsedOptions)
     try commandLine.appendLast(.printEducationalNotes, from: &parsedOptions)
+    try commandLine.appendLast(.diagnosticStyle, from: &parsedOptions)
+    try commandLine.appendLast(.enableDirectIntramoduleDependencies, .disableDirectIntramoduleDependencies, from: &parsedOptions)
+    try commandLine.appendLast(.locale, from: &parsedOptions)
+    try commandLine.appendLast(.localizationPath, from: &parsedOptions)
     try commandLine.appendAll(.D, from: &parsedOptions)
     try commandLine.appendAll(.sanitizeEQ, from: &parsedOptions)
     try commandLine.appendAll(.debugPrefixMap, from: &parsedOptions)
@@ -287,7 +290,7 @@ extension Driver {
       }
 
       addOutputOfType(
-          outputType: .optimizationRecord,
+          outputType: .yamlOptimizationRecord,
           finalOutputPath: optimizationRecordPath,
           input: input,
           flag: "-save-optimization-record-path")
@@ -343,5 +346,14 @@ extension Driver {
       fatalError("No handler in Explicit Module Build mode.")
     }
     try handler.resolveMainModuleDependencies(inputs: &inputs, commandLine: &commandLine)
+  }
+
+  /// In Explicit Module Build mode, distinguish between main module jobs and intermediate dependency build jobs,
+  /// such as Swift modules built from .swiftmodule files and Clang PCMs.
+  public func isExplicitMainModuleJob(job: Job) -> Bool {
+    guard let handler = explicitModuleBuildHandler else {
+      fatalError("No handler in Explicit Module Build mode.")
+    }
+    return job.moduleName == handler.dependencyGraph.mainModuleName
   }
 }

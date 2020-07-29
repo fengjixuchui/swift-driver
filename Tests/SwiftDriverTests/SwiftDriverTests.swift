@@ -42,6 +42,14 @@ final class SwiftDriverTests: XCTestCase {
     let driver6 = try Driver.invocationRunMode(forArgs: ["swift", "foo", "bar"])
     XCTAssertEqual(driver6.mode, .subcommand("swift-foo"))
     XCTAssertEqual(driver6.args, ["swift-foo", "bar"])
+
+    let driver7 = try Driver.invocationRunMode(forArgs: ["swift", "-frontend", "foo", "bar"])
+    XCTAssertEqual(driver7.mode, .subcommand("swift-frontend"))
+    XCTAssertEqual(driver7.args, ["swift-frontend", "foo", "bar"])
+
+    let driver8 = try Driver.invocationRunMode(forArgs: ["swift", "-modulewrap", "foo", "bar"])
+    XCTAssertEqual(driver8.mode, .subcommand("swift-frontend"))
+    XCTAssertEqual(driver8.args, ["swift-frontend", "-modulewrap", "foo", "bar"])
   }
 
   func testSubcommandsHandling() throws {
@@ -79,21 +87,10 @@ final class SwiftDriverTests: XCTestCase {
     try assertArgs("/path/to/swift", parseTo: .interactive, leaving: [])
     try assertArgs("swiftc", parseTo: .batch, leaving: [])
     try assertArgs(".build/debug/swiftc", parseTo: .batch, leaving: [])
-    try assertArgs("swiftc", "-frontend", parseTo: .frontend, leaving: [])
-    try assertArgs("swiftc", "-modulewrap", parseTo: .moduleWrap, leaving: [])
-    try assertArgs("/path/to/swiftc", "-modulewrap",
-                   parseTo: .moduleWrap, leaving: [])
-
     try assertArgs("swiftc", "--driver-mode=swift", parseTo: .interactive, leaving: [])
-    try assertArgs("swiftc", "--driver-mode=swift-autolink-extract", parseTo: .autolinkExtract, leaving: [])
-    try assertArgs("swift", "--driver-mode=swift-autolink-extract", parseTo: .autolinkExtract, leaving: [])
-
     try assertArgs("swift", "-zelda", parseTo: .interactive, leaving: ["-zelda"])
-    try assertArgs("/path/to/swiftc", "-modulewrap", "savannah",
-                   parseTo: .moduleWrap, leaving: ["savannah"])
     try assertArgs("swiftc", "--driver-mode=swift", "swiftc",
                    parseTo: .interactive, leaving: ["swiftc"])
-
     try assertArgsThrow("driver")
     try assertArgsThrow("swiftc", "--driver-mode=blah")
     try assertArgsThrow("swiftc", "--driver-mode=")
@@ -648,7 +645,7 @@ final class SwiftDriverTests: XCTestCase {
   }
 
   func testUsingResponseFiles() throws {
-    let manyArgs = (1...500_000).map { "-DTEST_\($0)" }
+    let manyArgs = (1...20000).map { "-DTEST_\($0)" }
     // Needs response file
     do {
       var driver = try Driver(args: ["swift"] + manyArgs + ["foo.swift"])
@@ -662,7 +659,7 @@ final class SwiftDriverTests: XCTestCase {
       let responseFilePath = try AbsolutePath(validating: String(resolvedArgs[1].dropFirst()))
       let contents = try localFileSystem.readFileContents(responseFilePath).description
       XCTAssertTrue(contents.hasPrefix("-frontend\n-interpret\nfoo.swift"))
-      XCTAssertTrue(contents.contains("-D\nTEST_500000"))
+      XCTAssertTrue(contents.contains("-D\nTEST_20000"))
       XCTAssertTrue(contents.contains("-D\nTEST_1"))
     }
     // Forced response file
@@ -1012,7 +1009,7 @@ final class SwiftDriverTests: XCTestCase {
   #if os(macOS)
     let commonArgs = [
       "swiftc", "foo.swift", "bar.swift",
-      "-emit-executable", "-target", "x86_64-apple-macosx",
+      "-emit-executable", "-target", "x86_64-apple-macosx10.9",
       "-module-name", "Test"
     ]
     do {
@@ -1103,6 +1100,27 @@ final class SwiftDriverTests: XCTestCase {
       let linkJob = plannedJobs[3]
       let linkCmd = linkJob.commandLine
       XCTAssertTrue(linkCmd.contains(.flag("-fsanitize=address,undefined")))
+    }
+
+    do {
+      // linux scudo hardened allocator
+      var driver = try Driver(
+        args: commonArgs + [
+          "-target", "x86_64-unknown-linux",
+          "-sanitize=scudo"
+        ]
+      )
+      let plannedJobs = try driver.planBuild()
+
+      XCTAssertEqual(plannedJobs.count, 4)
+
+      let compileJob = plannedJobs[0]
+      let compileCmd = compileJob.commandLine
+      XCTAssertTrue(compileCmd.contains(.flag("-sanitize=scudo")))
+
+      let linkJob = plannedJobs[3]
+      let linkCmd = linkJob.commandLine
+      XCTAssertTrue(linkCmd.contains(.flag("-fsanitize=scudo")))
     }
     #endif
   #endif
@@ -1489,6 +1507,58 @@ final class SwiftDriverTests: XCTestCase {
     }
   }
 
+  func testDarwinToolchainArgumentValidation() throws {
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-target", "x86_64-apple-ios6.0",
+                                           "foo.swift"])) { error in
+      guard case DarwinToolchain.ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("iOS 7") = error else {
+        XCTFail()
+        return
+      }
+    }
+
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-target", "x86_64-apple-macosx10.4",
+                                           "foo.swift"])) { error in
+      guard case DarwinToolchain.ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("OS X 10.9") = error else {
+        XCTFail()
+        return
+      }
+    }
+
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-target", "armv7-apple-ios12.0",
+                                           "foo.swift"])) { error in
+      guard case DarwinToolchain.ToolchainValidationError.iOSVersionAboveMaximumDeploymentTarget(12) = error else {
+        XCTFail()
+        return
+      }
+    }
+
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-target", "x86_64-apple-ios13.0",
+                                           "-target-variant", "x86_64-apple-macosx10.14",
+                                           "foo.swift"])) { error in
+      guard case DarwinToolchain.ToolchainValidationError.unsupportedTargetVariant(variant: _) = error else {
+        XCTFail()
+        return
+      }
+    }
+    
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-static-stdlib", "-target", "x86_64-apple-macosx10.14",
+                                           "foo.swift"])) { error in
+      guard case DarwinToolchain.ToolchainValidationError.argumentNotSupported("-static-stdlib") = error else {
+        XCTFail()
+        return
+      }
+    }
+    
+    XCTAssertThrowsError(try Driver(args: ["swiftc", "-c", "-target", "x86_64-apple-macosx10.14", "-experimental-cxx-stdlib", "libstdc++",
+                                           "foo.swift"])) { error in
+        guard case DarwinToolchain.ToolchainValidationError.darwinOnlySupportsLibCxx = error else {
+        XCTFail()
+        return
+      }
+    }
+    try assertNoDriverDiagnostics(args: "swiftc", "-c", "-target", "x86_64-apple-macosx10.14", "-link-objc-runtime", "foo.swift")
+  }
+
   func testDSYMGeneration() throws {
     let commonArgs = [
       "swiftc", "foo.swift", "bar.swift",
@@ -1617,22 +1687,10 @@ final class SwiftDriverTests: XCTestCase {
     _ = try driverWithEmptySDK.planBuild()
   }
 
-  func testToolchainUtilities() throws {
-    let executor = try SwiftDriverExecutor(diagnosticsEngine: DiagnosticsEngine(),
-                                           processSet: ProcessSet(),
-                                           fileSystem: localFileSystem,
-                                           env: ProcessEnv.vars)
-    let darwinToolchain = DarwinToolchain(env: ProcessEnv.vars, executor: executor)
-    let darwinSwiftVersion = try darwinToolchain.swiftCompilerVersion()
-    let unixToolchain =  GenericUnixToolchain(env: ProcessEnv.vars, executor: executor)
-    let unixSwiftVersion = try unixToolchain.swiftCompilerVersion()
-    assertString(darwinSwiftVersion, contains: "Swift version ")
-    assertString(unixSwiftVersion, contains: "Swift version ")
-  }
-
   func testToolchainClangPath() throws {
     // Overriding the swift executable to a specific location breaks this.
-    guard ProcessEnv.vars["SWIFT_DRIVER_SWIFT_EXEC"] == nil else {
+    guard ProcessEnv.vars["SWIFT_DRIVER_SWIFT_EXEC"] == nil,
+          ProcessEnv.vars["SWIFT_DRIVER_SWIFT_FRONTEND_EXEC"] == nil else {
       return
     }
     // TODO: remove this conditional check once DarwinToolchain does not requires xcrun to look for clang.

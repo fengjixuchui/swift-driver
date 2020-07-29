@@ -191,7 +191,7 @@ public struct Driver {
   /// Handler for constructing module build jobs using Explicit Module Builds.
   /// Constructed during the planning phase only when all modules will be prebuilt and treated
   /// as explicit by the various compilation jobs.
-  public var explicitModuleBuildHandler: ExplicitModuleBuildHandler? = nil
+  @_spi(Testing) public var explicitModuleBuildHandler: ExplicitModuleBuildHandler? = nil
 
   /// Handler for emitting diagnostics to stderr.
   public static let stderrDiagnosticsHandler: DiagnosticsEngine.DiagnosticsHandler = { diagnostic in
@@ -232,16 +232,13 @@ public struct Driver {
     env: [String: String] = ProcessEnv.vars,
     diagnosticsEngine: DiagnosticsEngine = DiagnosticsEngine(handlers: [Driver.stderrDiagnosticsHandler]),
     fileSystem: FileSystem = localFileSystem,
-    executor: DriverExecutor? = nil
+    executor: DriverExecutor
   ) throws {
     self.env = env
     self.fileSystem = fileSystem
 
     self.diagnosticEngine = diagnosticsEngine
-    self.executor = try executor ?? SwiftDriverExecutor(diagnosticsEngine: diagnosticsEngine,
-                                                        processSet: ProcessSet(),
-                                                        fileSystem: fileSystem,
-                                                        env: env)
+    self.executor = executor
 
     if case .subcommand = try Self.invocationRunMode(forArgs: args).mode {
       throw Error.subcommandPassedToDriver
@@ -312,6 +309,10 @@ public struct Driver {
 
     try Self.validateWarningControlArgs(&parsedOptions)
     Self.validateCoverageArgs(&parsedOptions, diagnosticsEngine: diagnosticEngine)
+    try toolchain.validateArgs(&parsedOptions,
+                               targetTriple: self.frontendTargetInfo.target.triple,
+                               targetVariantTriple: self.frontendTargetInfo.targetVariant?.triple,
+                               diagnosticsEngine: diagnosticEngine)
 
     // Compute debug information output.
     self.debugInfo = Self.computeDebugInfo(&parsedOptions, diagnosticsEngine: diagnosticEngine)
@@ -331,7 +332,7 @@ public struct Driver {
       fileSystem: fileSystem,
       inputFiles: inputFiles,
       diagnosticEngine: diagnosticEngine,
-      actualSwiftVersion: try? toolchain.swiftCompilerVersion()
+      actualSwiftVersion: self.frontendTargetInfo.compilerVersion
     )
 
     // Local variable to alias the target triple, because self.targetTriple
@@ -352,21 +353,21 @@ public struct Driver {
 
     // Supplemental outputs.
     self.dependenciesFilePath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .dependencies, isOutput: .emitDependencies,
+        &parsedOptions, type: .dependencies, isOutputOptions: [.emitDependencies],
         outputPath: .emitDependenciesPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
     self.referenceDependenciesFilePath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .swiftDeps, isOutput: .emitReferenceDependencies,
+        &parsedOptions, type: .swiftDeps, isOutputOptions: [.emitReferenceDependencies],
         outputPath: .emitReferenceDependenciesPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
     self.serializedDiagnosticsFilePath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .diagnostics, isOutput: .serializeDiagnostics,
+        &parsedOptions, type: .diagnostics, isOutputOptions: [.serializeDiagnostics],
         outputPath: .serializeDiagnosticsPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
@@ -374,21 +375,21 @@ public struct Driver {
         moduleName: moduleOutputInfo.name)
     // FIXME: -fixits-output-path
     self.objcGeneratedHeaderPath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .objcHeader, isOutput: .emitObjcHeader,
+        &parsedOptions, type: .objcHeader, isOutputOptions: [.emitObjcHeader],
         outputPath: .emitObjcHeaderPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
     self.loadedModuleTracePath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .moduleTrace, isOutput: .emitLoadedModuleTrace,
+        &parsedOptions, type: .moduleTrace, isOutputOptions: [.emitLoadedModuleTrace],
         outputPath: .emitLoadedModuleTracePath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
     self.tbdPath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .tbd, isOutput: .emitTbd,
+        &parsedOptions, type: .tbd, isOutputOptions: [.emitTbd],
         outputPath: .emitTbdPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
@@ -408,15 +409,28 @@ public struct Driver {
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
     self.swiftInterfacePath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .swiftInterface, isOutput: .emitModuleInterface,
+        &parsedOptions, type: .swiftInterface, isOutputOptions: [.emitModuleInterface],
         outputPath: .emitModuleInterfacePath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
+
+    var optimizationRecordFileType = FileType.yamlOptimizationRecord
+    if let argument = parsedOptions.getLastArgument(.saveOptimizationRecordEQ)?.asSingle {
+      switch argument {
+      case "yaml":
+        optimizationRecordFileType = .yamlOptimizationRecord
+      case "bitstream":
+        optimizationRecordFileType = .bitstreamOptimizationRecord
+      default:
+        // Don't report an error here, it will be emitted by the frontend.
+        break
+      }
+    }
     self.optimizationRecordPath = try Self.computeSupplementaryOutputPath(
-        &parsedOptions, type: .optimizationRecord,
-        isOutput: .saveOptimizationRecord,
+        &parsedOptions, type: optimizationRecordFileType,
+        isOutputOptions: [.saveOptimizationRecord, .saveOptimizationRecordEQ],
         outputPath: .saveOptimizationRecordPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
@@ -444,11 +458,30 @@ extension Driver {
 
     let execName = try VirtualPath(path: args[0]).basenameWithoutExt
 
-    // If we are not run as 'swift' or there are no program arguments, always invoke as normal.
-    guard execName == "swift", args.count > 1 else { return (.normal(isRepl: false), args) }
+    // If we are not run as 'swift' or 'swiftc' or there are no program arguments, always invoke as normal.
+    guard execName == "swift" || execName == "swiftc", args.count > 1 else {
+      return (.normal(isRepl: false), args)
+    }
 
     // Otherwise, we have a program argument.
     let firstArg = args[1]
+    var updatedArgs = args
+
+    // Check for flags associated with frontend tools.
+    if firstArg == "-frontend" {
+      updatedArgs.replaceSubrange(0...1, with: ["swift-frontend"])
+      return (.subcommand("swift-frontend"), updatedArgs)
+    }
+
+    if firstArg == "-modulewrap" {
+      updatedArgs[0] = "swift-frontend"
+      return (.subcommand("swift-frontend"), updatedArgs)
+    }
+
+    // Only 'swift' supports subcommands.
+    guard execName == "swift" else {
+      return (.normal(isRepl: false), args)
+    }
 
     // If it looks like an option or a path, then invoke in interactive mode with the arguments as given.
     if firstArg.hasPrefix("-") || firstArg.hasPrefix("/") || firstArg.contains(".") {
@@ -456,9 +489,6 @@ extension Driver {
     }
 
     // Otherwise, we should have some sort of subcommand.
-
-    var updatedArgs = args
-
     // If it is the "built-in" 'repl', then use the normal driver.
     if firstArg == "repl" {
         updatedArgs.remove(at: 1)
@@ -594,20 +624,11 @@ extension Driver {
     let execRelPath = args.removeFirst()
     var driverName = try VirtualPath(path: execRelPath).basenameWithoutExt
 
-    // Determine driver kind based on the first argument.
+    // Determine if the driver kind is being overriden.
     let driverModeOption = "--driver-mode="
-    switch args.first {
-    case "-frontend"?:
-      args.removeFirst()
-      return .frontend
-    case "-modulewrap"?:
-      args.removeFirst()
-      return .moduleWrap
-    case let firstArg? where firstArg.hasPrefix(driverModeOption):
+    if let firstArg = args.first, firstArg.hasPrefix(driverModeOption) {
       args.removeFirst()
       driverName = String(firstArg.dropFirst(driverModeOption.count))
-    default:
-      break
     }
 
     switch driverName {
@@ -615,8 +636,6 @@ extension Driver {
       return .interactive
     case "swiftc":
       return .batch
-    case "swift-autolink-extract":
-      return .autolinkExtract
     default:
       throw Error.invalidDriverName(driverName)
     }
@@ -626,11 +645,6 @@ extension Driver {
   public mutating func run(
     jobs: [Job]
   ) throws {
-    // We just need to invoke the corresponding tool if the kind isn't Swift compiler.
-    guard driverKind.isSwiftCompiler else {
-      return try exec(path: toolchain.getToolPath(.swiftCompiler).pathString, args: driverKind.usageArgs + parsedOptions.commandLine)
-    }
-
     if parsedOptions.hasArgument(.v) {
       try printVersion(outputStream: &stderrStream)
     }
@@ -1201,6 +1215,19 @@ extension Driver {
       )
     }
 
+    // Scudo can only be run with ubsan.
+    if set.contains(.scudo) {
+      let allowedSanitizers: Set<Sanitizer> = [.scudo, .undefinedBehavior]
+      for forbiddenSanitizer in set.subtracting(allowedSanitizers) {
+        diagnosticEngine.emit(
+          .error_argument_not_allowed_with(
+            arg: "-sanitize=scudo",
+            other: "-sanitize=\(forbiddenSanitizer.rawValue)"
+          )
+        )
+      }
+    }
+
     return set
   }
 
@@ -1601,7 +1628,9 @@ extension Driver {
     var info = try executor.execute(
         job: toolchain.printTargetInfoJob(
           target: explicitTarget, targetVariant: explicitTargetVariant,
-          sdkPath: sdkPath, resourceDirPath: resourceDirPath
+          sdkPath: sdkPath, resourceDirPath: resourceDirPath,
+          runtimeCompatibilityVersion:
+            parsedOptions.getLastArgument(.runtimeCompatibilityVersion)?.asSingle
         ),
         capturingJSONOutputAs: FrontendTargetInfo.self,
         forceResponseFiles: false,
@@ -1631,7 +1660,7 @@ extension Driver {
   static func computeSupplementaryOutputPath(
     _ parsedOptions: inout ParsedOptions,
     type: FileType,
-    isOutput: Option?,
+    isOutputOptions: [Option],
     outputPath: Option,
     compilerOutputType: FileType?,
     compilerMode: CompilerMode,
@@ -1641,15 +1670,15 @@ extension Driver {
   ) throws -> VirtualPath? {
     // If there is an explicit argument for the output path, use that
     if let outputPathArg = parsedOptions.getLastArgument(outputPath) {
-      // Consume the isOutput argument
-      if let isOutput = isOutput {
+      for isOutput in isOutputOptions {
+        // Consume the isOutput argument
         _ = parsedOptions.hasArgument(isOutput)
       }
       return try VirtualPath(path: outputPathArg.asSingle)
     }
 
-    // If the output option was not provided, don't produce this output at all.
-    guard let isOutput = isOutput, parsedOptions.hasArgument(isOutput) else {
+    // If no output option was provided, don't produce this output at all.
+    guard isOutputOptions.contains(where: { parsedOptions.hasArgument($0) }) else {
       return nil
     }
 
@@ -1670,7 +1699,7 @@ extension Driver {
         return path
       }
 
-      return try path.replacingExtension(with: type)
+      return path.parentDirectory.appending(component: "\(moduleName).\(type.rawValue)")
     }
 
     return try VirtualPath(path: moduleName.appendingFileTypeExtension(type))

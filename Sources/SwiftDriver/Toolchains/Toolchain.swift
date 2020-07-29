@@ -53,6 +53,11 @@ public protocol Toolchain {
   /// Constructs a proper output file name for a linker product.
   func makeLinkerOutputFilename(moduleName: String, type: LinkOutputType) -> String
 
+  /// Perform platform-specific argument validation.
+  func validateArgs(_ parsedOptions: inout ParsedOptions,
+                    targetTriple: Triple,
+                    targetVariantTriple: Triple?, diagnosticsEngine: DiagnosticsEngine) throws
+
   /// Adds platform-specific linker flags to the provided command line
   func addPlatformSpecificLinkerArgs(
     to commandLine: inout [Job.ArgTemplate],
@@ -81,13 +86,6 @@ public protocol Toolchain {
 extension Toolchain {
   public var searchPaths: [AbsolutePath] {
     getEnvSearchPaths(pathString: env["PATH"], currentWorkingDirectory: fileSystem.currentWorkingDirectory)
-  }
-
-  public func swiftCompilerVersion() throws -> String {
-    try executor.checkNonZeroExit(
-      args: getToolPath(.swiftCompiler).pathString, "-version",
-      environment: env
-    ).split(separator: "\n").first.map(String.init) ?? ""
   }
 
   /// Returns the `executablePath`'s directory.
@@ -154,6 +152,10 @@ extension Toolchain {
     ).spm_chomp()
     return AbsolutePath(path)
   }
+
+  public func validateArgs(_ parsedOptions: inout ParsedOptions,
+                           targetTriple: Triple,
+                           targetVariantTriple: Triple?, diagnosticsEngine: DiagnosticsEngine) {}
 }
 
 public enum ToolchainError: Swift.Error {

@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 import TSCBasic
+import SwiftOptions
 
 /// Toolchain for Darwin-based platforms, such as macOS and iOS.
 ///
@@ -48,22 +49,14 @@ public final class DarwinToolchain: Toolchain {
     switch tool {
     case .swiftCompiler:
       return try lookup(executable: "swift-frontend")
-
     case .dynamicLinker:
       return try lookup(executable: "ld")
-
     case .staticLinker:
       return try lookup(executable: "libtool")
-
     case .dsymutil:
       return try lookup(executable: "dsymutil")
-
     case .clang:
-      let result = try executor.checkNonZeroExit(
-        args: "xcrun", "-toolchain", "default", "-f", "clang",
-        environment: env
-      ).spm_chomp()
-      return AbsolutePath(result)
+      return try lookup(executable: "clang")
     case .swiftAutolinkExtract:
       return try lookup(executable: "swift-autolink-extract")
     case .lldb:
@@ -79,25 +72,9 @@ public final class DarwinToolchain: Toolchain {
     toolPaths[tool] = path
   }
 
-  /// SDK path.
-  public lazy var sdk: Result<AbsolutePath, Swift.Error> = Result {
-    let result = try executor.checkNonZeroExit(
-      args: "xcrun", "-sdk", "macosx", "--show-sdk-path",
-      environment: env
-    ).spm_chomp()
-    return AbsolutePath(result)
-  }
-
   /// Path to the StdLib inside the SDK.
   public func sdkStdlib(sdk: AbsolutePath) -> AbsolutePath {
     sdk.appending(RelativePath("usr/lib/swift"))
-  }
-
-  public var resourcesDirectory: Result<AbsolutePath, Swift.Error> {
-    // FIXME: This will need to take -resource-dir and target triple into account.
-    return Result {
-      try getToolPath(.swiftCompiler).appending(RelativePath("../../lib/swift/macosx"))
-    }
   }
 
   public func makeLinkerOutputFilename(moduleName: String, type: LinkOutputType) -> String {
@@ -106,18 +83,6 @@ public final class DarwinToolchain: Toolchain {
     case .dynamicLibrary: return "lib\(moduleName).dylib"
     case .staticLibrary: return "lib\(moduleName).a"
     }
-  }
-
-  public var compatibility50: Result<AbsolutePath, Error> {
-    resourcesDirectory.map { $0.appending(component: "libswiftCompatibility50.a") }
-  }
-
-  public var compatibilityDynamicReplacements: Result<AbsolutePath, Error> {
-    resourcesDirectory.map { $0.appending(component: "libswiftCompatibilityDynamicReplacements.a") }
-  }
-
-  public var clangRT: Result<AbsolutePath, Error> {
-    resourcesDirectory.map { $0.appending(RelativePath("../clang/lib/darwin/libclang_rt.osx.a")) }
   }
 
   public func defaultSDKPath(_ target: Triple?) throws -> AbsolutePath? {
@@ -155,4 +120,98 @@ public final class DarwinToolchain: Toolchain {
     \(isShared ? "_dynamic.dylib" : ".a")
     """
   }
+
+  public enum ToolchainValidationError: Error, DiagnosticData {
+    case osVersionBelowMinimumDeploymentTarget(String)
+    case argumentNotSupported(String)
+    case iOSVersionAboveMaximumDeploymentTarget(Int)
+    case unsupportedTargetVariant(variant: Triple)
+    case darwinOnlySupportsLibCxx
+
+    public var description: String {
+      switch self {
+      case .osVersionBelowMinimumDeploymentTarget(let target):
+        return "Swift requires a minimum deployment target of \(target)"
+      case .iOSVersionAboveMaximumDeploymentTarget(let version):
+        return "iOS \(version) does not support 32-bit programs"
+      case .unsupportedTargetVariant(variant: let variant):
+        return "unsupported '\(variant.isiOS ? "-target" : "-target-variant")' value '\(variant)'; use 'ios-macabi' instead"
+      case .argumentNotSupported(let argument):
+        return "\(argument) is no longer supported for Apple platforms"
+      case .darwinOnlySupportsLibCxx:
+        return "The only C++ standard library supported on Apple platforms is libc++"
+      }
+    }
+  }
+
+  public func validateArgs(_ parsedOptions: inout ParsedOptions,
+                           targetTriple: Triple,
+                           targetVariantTriple: Triple?,
+                           diagnosticsEngine: DiagnosticsEngine) throws {
+    // Validating arclite library path when link-objc-runtime.
+    validateLinkObjcRuntimeARCLiteLib(&parsedOptions,
+                                      targetTriple: targetTriple,
+                                      diagnosticsEngine: diagnosticsEngine)
+    // Validating apple platforms deployment targets.
+    try validateDeploymentTarget(&parsedOptions, targetTriple: targetTriple)
+    if let targetVariantTriple = targetVariantTriple,
+       !targetTriple.isValidForZipperingWithTriple(targetVariantTriple) {
+      throw ToolchainValidationError.unsupportedTargetVariant(variant: targetVariantTriple)
+    }
+    // Validating darwin unsupported -static-stdlib argument.
+    if parsedOptions.hasArgument(.staticStdlib) {
+        throw ToolchainValidationError.argumentNotSupported("-static-stdlib")
+    }
+    // If a C++ standard library is specified, it has to be libc++.
+    if let cxxLib = parsedOptions.getLastArgument(.experimentalCxxStdlib) {
+        if cxxLib.asSingle != "libc++" {
+            throw ToolchainValidationError.darwinOnlySupportsLibCxx
+        }
+    }
+  }
+
+  func validateDeploymentTarget(_ parsedOptions: inout ParsedOptions,
+                                targetTriple: Triple) throws {
+    // Check minimum supported OS versions.
+    if targetTriple.isMacOSX,
+       targetTriple.version(for: .macOS) < Triple.Version(10, 9, 0) {
+      throw ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("OS X 10.9")
+    }
+    // tvOS triples are also iOS, so check it first.
+    else if targetTriple.isTvOS,
+            targetTriple.version(for: .tvOS(.device)) < Triple.Version(9, 0, 0) {
+      throw ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("tvOS 9.0")
+    } else if targetTriple.isiOS {
+      if targetTriple.version(for: .iOS(.device)) < Triple.Version(7, 0, 0) {
+        throw ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("iOS 7")
+      }
+      if targetTriple.arch?.is32Bit == true,
+         targetTriple.version(for: .iOS(.device)) >= Triple.Version(11, 0, 0) {
+        throw ToolchainValidationError.iOSVersionAboveMaximumDeploymentTarget(targetTriple.version(for: .iOS(.device)).major)
+      }
+    } else if targetTriple.isWatchOS,
+              targetTriple.version(for: .watchOS(.device)) < Triple.Version(2, 0, 0) {
+      throw ToolchainValidationError.osVersionBelowMinimumDeploymentTarget("watchOS 2.0")
+    }
+  }
+    
+  func validateLinkObjcRuntimeARCLiteLib(_ parsedOptions: inout ParsedOptions,
+                                           targetTriple: Triple,
+                                           diagnosticsEngine: DiagnosticsEngine) {
+    if parsedOptions.hasFlag(positive: .linkObjcRuntime, negative: .noLinkObjcRuntime, default: targetTriple.supports(.compatibleObjCRuntime)) {
+        guard let _ = try? findARCLiteLibPath() else {
+            diagnosticsEngine.emit(.warn_arclite_not_found_when_link_objc_runtime)
+            return
+        }
+    }
+  }
+}
+
+extension Diagnostic.Message {
+    static var warn_arclite_not_found_when_link_objc_runtime: Diagnostic.Message {
+      .warning(
+        "unable to find Objective-C runtime support library 'arclite'; " +
+        "pass '-no-link-objc-runtime' to silence this warning"
+      )
+    }
 }
