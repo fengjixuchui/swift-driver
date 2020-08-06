@@ -8,7 +8,8 @@
 
 add_library(SwiftDriver
   "Explicit Module Builds/ClangModuleBuildJobCache.swift"
-  "Explicit Module Builds/ExplicitModuleBuildHandler.swift"   
+  "Explicit Module Builds/ExplicitModuleBuildHandler.swift"
+  "Explicit Module Builds/PlaceholderDependencyResolution.swift"
   "Explicit Module Builds/InterModuleDependencyGraph.swift"
   "Explicit Module Builds/ModuleDependencyScanning.swift"
   "Explicit Module Builds/ModuleArtifacts.swift"
@@ -28,7 +29,7 @@ add_library(SwiftDriver
   Execution/ProcessProtocol.swift
   Execution/llbuild.swift
 
-  "Incremental Compilation/IncrementalCompilation.swift"
+  "Incremental Compilation/IncrementalCompilationState.swift"
   "Incremental Compilation/InputIInfoMap.swift"
   "Incremental Compilation/InputInfo.swift"
   "Incremental Compilation/SourceFileDependencyGraph.swift"
@@ -59,6 +60,8 @@ add_library(SwiftDriver
   Toolchains/GenericUnixToolchain.swift
   Toolchains/Toolchain.swift
 
+  Utilities/Bits.swift
+  Utilities/Bitstream.swift
   Utilities/DOTJobGraphSerializer.swift
   Utilities/DateAdditions.swift
   Utilities/Diagnostics.swift
