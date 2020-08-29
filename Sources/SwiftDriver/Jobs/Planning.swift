@@ -188,8 +188,10 @@ extension Driver {
     jobs.append(contentsOf: backendJobs)
 
     // Plan the merge-module job, if there are module inputs.
+    var mergeJob: Job?
     if moduleOutputInfo.output != nil && !moduleInputs.isEmpty && compilerMode.usesPrimaryFileInputs {
-      jobs.append(try mergeModuleJob(inputs: moduleInputs))
+      mergeJob = try mergeModuleJob(inputs: moduleInputs)
+      jobs.append(mergeJob!)
     }
 
     // If we need to autolink-extract, do so.
@@ -197,6 +199,20 @@ extension Driver {
     if let autolinkExtractJob = try autolinkExtractJob(inputs: autolinkInputs) {
       linkerInputs.append(contentsOf: autolinkExtractJob.outputs)
       jobs.append(autolinkExtractJob)
+    }
+
+    if let mergeJob = mergeJob, debugInfo.level == .astTypes {
+      if targetTriple.objectFormat != .macho {
+        // Module wrapping is required.
+        let mergeModuleOutputs = mergeJob.outputs.filter { $0.type == .swiftModule }
+        assert(mergeModuleOutputs.count == 1,
+               "Merge module job should only have one swiftmodule output")
+        let wrapJob = try moduleWrapJob(moduleInput: mergeModuleOutputs[0])
+        linkerInputs.append(contentsOf: wrapJob.outputs)
+        jobs.append(wrapJob)
+      } else {
+        linkerInputs.append(contentsOf: mergeJob.outputs)
+      }
     }
 
     // If we should link, do so.
@@ -220,22 +236,35 @@ extension Driver {
 
   /// Prescan the source files to produce a module dependency graph and turn it into a set
   /// of jobs required to build all dependencies.
+  /// Preprocess the graph by resolving placeholder dependencies, if any are present and
+  /// by re-scanning all Clang modules against all possible targets they will be built against.
   public mutating func generateExplicitModuleBuildJobs() throws -> [Job] {
+    let dependencyGraph = try generateInterModuleDependencyGraph()
+    explicitModuleBuildHandler =
+        try ExplicitModuleBuildHandler(dependencyGraph: dependencyGraph,
+                                       toolchain: toolchain,
+                                       fileSystem: fileSystem)
+    return try explicitModuleBuildHandler!.generateExplicitModuleDependenciesBuildJobs()
+  }
+
+  private mutating func generateInterModuleDependencyGraph() throws -> InterModuleDependencyGraph {
     let dependencyScannerJob = try dependencyScanningJob()
     let forceResponseFiles = parsedOptions.hasArgument(.driverForceResponseFiles)
 
-    let dependencyGraph =
+    var dependencyGraph =
       try self.executor.execute(job: dependencyScannerJob,
                                 capturingJSONOutputAs: InterModuleDependencyGraph.self,
                                 forceResponseFiles: forceResponseFiles,
                                 recordedInputModificationDates: recordedInputModificationDates)
 
-    explicitModuleBuildHandler =
-        try ExplicitModuleBuildHandler(dependencyGraph: dependencyGraph,
-                                       toolchain: toolchain,
-                                       fileSystem: fileSystem,
-                                       externalDependencyArtifactMap: externalDependencyArtifactMap ?? [:])
-    return try explicitModuleBuildHandler!.generateExplicitModuleDependenciesBuildJobs()
+    // Resolve placeholder dependencies in the dependency graph, if any.
+    if externalDependencyArtifactMap != nil, !externalDependencyArtifactMap!.isEmpty {
+      try dependencyGraph.resolvePlaceholderDependencies(using: externalDependencyArtifactMap!)
+    }
+
+    // Re-scan Clang modules at all the targets they will be built against
+    try resolveVersionedClangDependencies(dependencyGraph: &dependencyGraph)
+    return dependencyGraph
   }
 
   /// Create a job if needed for simple requests that can be immediately
@@ -244,12 +273,22 @@ extension Driver {
     if parsedOptions.hasArgument(.printTargetInfo) {
       let sdkPath = try parsedOptions.getLastArgument(.sdk).map { try VirtualPath(path: $0.asSingle) }
       let resourceDirPath = try parsedOptions.getLastArgument(.resourceDir).map { try VirtualPath(path: $0.asSingle) }
+      var useStaticResourceDir = false
+      if parsedOptions.hasFlag(positive: .staticExecutable,
+                              negative: .noStaticExecutable,
+                              default: false) ||
+         parsedOptions.hasFlag(positive: .staticStdlib,
+                              negative: .noStaticStdlib,
+                              default: false) {
+        useStaticResourceDir = true
+      }
       
       return try toolchain.printTargetInfoJob(target: targetTriple,
                                               targetVariant: targetVariantTriple,
                                               sdkPath: sdkPath,
                                               resourceDirPath: resourceDirPath,
-                                              requiresInPlaceExecution: true)
+                                              requiresInPlaceExecution: true,
+                                              useStaticResourceDir: useStaticResourceDir)
     }
 
     if parsedOptions.hasArgument(.version) || parsedOptions.hasArgument(.version_) {
@@ -286,6 +325,15 @@ extension Driver {
 
     if let job = try immediateForwardingJob() {
       return [job]
+    }
+
+    // The REPL doesn't require input files, but all other modes do.
+    guard !inputFiles.isEmpty || compilerMode == .repl else {
+      if parsedOptions.hasArgument(.v) {
+        // `swiftc -v` is allowed and prints version information.
+        return []
+      }
+      throw Error.noInputFiles
     }
 
     // Plan the build.

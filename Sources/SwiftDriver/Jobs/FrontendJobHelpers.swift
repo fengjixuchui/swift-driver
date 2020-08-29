@@ -158,6 +158,7 @@ extension Driver {
     try commandLine.appendLast(.disableParserLookup, from: &parsedOptions)
     try commandLine.appendLast(.sanitizeRecoverEQ, from: &parsedOptions)
     try commandLine.appendLast(.scanDependencies, from: &parsedOptions)
+    try commandLine.appendLast(.scanClangDependencies, from: &parsedOptions)
     try commandLine.appendLast(.fineGrainedDependencyIncludeIntrafile, from: &parsedOptions)
     try commandLine.appendLast(.enableExperimentalConcisePoundFile, from: &parsedOptions)
     try commandLine.appendLast(.printEducationalNotes, from: &parsedOptions)
@@ -185,6 +186,15 @@ extension Driver {
     commandLine.appendFlag(.resourceDir)
     commandLine.appendPath(
       try AbsolutePath(validating: frontendTargetInfo.paths.runtimeResourcePath))
+
+    if parsedOptions.hasFlag(positive: .staticExecutable,
+                             negative: .noStaticExecutable,
+                             default: false) ||
+       parsedOptions.hasFlag(positive: .staticStdlib,
+                             negative: .noStaticStdlib,
+                             default: false) {
+      commandLine.appendFlag("-use-static-resource-dir")
+    }
 
     // -g implies -enable-anonymous-context-mangled-names, because the extra
     // metadata aids debugging.
@@ -230,6 +240,10 @@ extension Driver {
     if compilerMode != .repl {
       commandLine.appendFlags("-module-name", moduleOutputInfo.name)
     }
+
+    try toolchain.addPlatformSpecificCommonFrontendOptions(commandLine: &commandLine,
+                                                           inputs: &inputs,
+                                                           frontendTargetInfo: frontendTargetInfo)
   }
 
   mutating func addFrontendSupplementaryOutputArguments(commandLine: inout [Job.ArgTemplate], primaryInputs: [TypedVirtualPath]) throws -> [TypedVirtualPath] {

@@ -9,6 +9,21 @@ import shutil
 import subprocess
 import sys
 
+# Tools constructed as a part of the a development build toolchain
+driver_toolchain_tools = ['swift', 'swift-frontend', 'clang', 'swift-help',
+                          'swift-autolink-extract', 'lldb']
+
+def call_output(cmd, cwd=None, stderr=False, verbose=False):
+    """Calls a subprocess for its return data."""
+    if verbose:
+        print(' '.join(cmd))
+    try:
+        return subprocess.check_output(cmd, cwd=cwd, stderr=stderr, universal_newlines=True).strip()
+    except Exception as e:
+        if not verbose:
+            print(' '.join(cmd))
+        error(str(e))
+
 def swiftpm(action, swift_exec, swiftpm_args, env=None):
   cmd = [swift_exec, action] + swiftpm_args
   print(' '.join(cmd))
@@ -91,8 +106,10 @@ def should_test_parallel():
   return True
 
 
-def handle_invocation(swift_exec, swift_frontend_exec, args):
+def handle_invocation(toolchain_bin, args):
   swiftpm_args = get_swiftpm_options(args)
+
+  swift_exec = os.path.join(toolchain_bin, 'swift')
 
   env = os.environ
   # Use local dependencies (i.e. checked out next to swift-driver).
@@ -102,13 +119,19 @@ def handle_invocation(swift_exec, swift_frontend_exec, args):
   if args.ninja_bin:
     env['NINJA_BIN'] = args.ninja_bin
 
-  print('Cleaning ' + args.build_path)
-  shutil.rmtree(args.build_path, ignore_errors=True)
+  if args.sysroot:
+    env['SDKROOT'] = args.sysroot
 
   if args.action == 'build':
     swiftpm('build', swift_exec, swiftpm_args, env)
+  elif args.action == 'clean':
+    print('Cleaning ' + args.build_path)
+    shutil.rmtree(args.build_path, ignore_errors=True)
   elif args.action == 'test':
-    env['SWIFT_DRIVER_SWIFT_FRONTEND_EXEC'] = '%s' % (swift_frontend_exec)
+    for tool in driver_toolchain_tools:
+        tool_path = os.path.join(toolchain_bin, tool)
+        if os.path.exists(tool_path):
+            env['SWIFT_DRIVER_' + tool.upper().replace('-','_') + '_EXEC'] = '%s' % (tool_path)
     env['SWIFT_EXEC'] = '%sc' % (swift_exec)
     test_args = swiftpm_args
     if should_test_parallel():
@@ -134,6 +157,9 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true', help='enable verbose output')
 
   subparsers = parser.add_subparsers(title='subcommands', dest='action', metavar='action')
+  clean_parser = subparsers.add_parser('clean', help='clean the package')
+  add_common_args(clean_parser)
+
   build_parser = subparsers.add_parser('build', help='build the package')
   add_common_args(build_parser)
 
@@ -150,14 +176,17 @@ def main():
   args.build_path = os.path.abspath(args.build_path)
   args.toolchain = os.path.abspath(args.toolchain)
 
-  if args.toolchain:
-    swift_exec = os.path.join(args.toolchain, 'bin', 'swift')
-    swift_frontend_exec = os.path.join(args.toolchain, 'bin', 'swift-frontend')
+  if platform.system() == 'Darwin':
+    args.sysroot = call_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], verbose=args.verbose)
   else:
-    swift_exec = 'swift'
-    swift_frontend_exec = 'swift-frontend'
+    args.sysroot = None
 
-  handle_invocation(swift_exec, swift_frontend_exec, args)
+  if args.toolchain:
+    toolchain_bin = os.path.join(args.toolchain, 'bin')
+  else:
+    toolchain_bin = ''
+
+  handle_invocation(toolchain_bin, args)
 
 if __name__ == '__main__':
   main()

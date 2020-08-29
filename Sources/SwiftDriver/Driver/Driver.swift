@@ -19,12 +19,14 @@ public struct Driver {
   public enum Error: Swift.Error, Equatable, DiagnosticData {
     case invalidDriverName(String)
     case invalidInput(String)
-    case noJobsPassedToDriverFromEmptyInputFileList
+    case noInputFiles
     case relativeFrontendPath(String)
     case subcommandPassedToDriver
     case integratedReplRemoved
     case conflictingOptions(Option, Option)
     case unableToLoadOutputFileMap(String)
+    case unableToDecodeFrontendTargetInfo
+    case failedToRetrieveFrontendTargetInfo
     // Explicit Module Build Failures
     case malformedModuleDependency(String, String)
     case missingPCMArguments(String)
@@ -38,7 +40,7 @@ public struct Driver {
         return "invalid driver name: \(driverName)"
       case .invalidInput(let input):
         return "invalid input: \(input)"
-      case .noJobsPassedToDriverFromEmptyInputFileList:
+      case .noInputFiles:
         return "no input files"
       case .relativeFrontendPath(let path):
         // TODO: where is this error thrown
@@ -49,6 +51,10 @@ public struct Driver {
         return "Compiler-internal integrated REPL has been removed; use the LLDB-enhanced REPL instead."
       case .conflictingOptions(let one, let two):
         return "conflicting options '\(one.spelling)' and '\(two.spelling)'"
+      case .unableToDecodeFrontendTargetInfo:
+        return "could not decode frontend target info; compiler driver and frontend executables may be incompatible"
+      case .failedToRetrieveFrontendTargetInfo:
+        return "failed to retrieve frontend target info"
       // Explicit Module Build Failures
       case .malformedModuleDependency(let moduleName, let errorDescription):
         return "Malformed Module Dependency: \(moduleName), \(errorDescription)"
@@ -199,7 +205,7 @@ public struct Driver {
   /// A collection describing external dependencies for the current main module that may be invisible to
   /// the driver itself, but visible to its clients (e.g. build systems like SwiftPM). Along with the external dependencies'
   /// module dependency graphs.
-  internal var externalDependencyArtifactMap: ExternalDependencyArtifactMap? = nil
+  @_spi(Testing) public var externalDependencyArtifactMap: ExternalDependencyArtifactMap? = nil
 
   /// Handler for emitting diagnostics to stderr.
   public static let stderrDiagnosticsHandler: DiagnosticsEngine.DiagnosticsHandler = { diagnostic in
@@ -415,13 +421,17 @@ public struct Driver {
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
         moduleName: moduleOutputInfo.name)
+    let projectDirectory = Self.computeProjectDirectoryPath(
+      moduleOutputPath: self.moduleOutputInfo.output?.outputPath,
+      fileSystem: self.fileSystem)
     self.moduleSourceInfoPath = try Self.computeModuleSourceInfoOutputPath(
         &parsedOptions,
         moduleOutputPath: self.moduleOutputInfo.output?.outputPath,
         compilerOutputType: compilerOutputType,
         compilerMode: compilerMode,
         outputFileMap: self.outputFileMap,
-        moduleName: moduleOutputInfo.name)
+        moduleName: moduleOutputInfo.name,
+        projectDirectory: projectDirectory)
     self.swiftInterfacePath = try Self.computeSupplementaryOutputPath(
         &parsedOptions, type: .swiftInterface, isOutputOptions: [.emitModuleInterface],
         outputPath: .emitModuleInterfacePath,
@@ -661,13 +671,6 @@ extension Driver {
   ) throws {
     if parsedOptions.hasArgument(.v) {
       try printVersion(outputStream: &stderrStream)
-    }
-
-    guard !jobs.isEmpty else {
-      guard !inputFiles.isEmpty else {
-        throw Error.noJobsPassedToDriverFromEmptyInputFileList
-      }
-      return
     }
 
     let forceResponseFiles = parsedOptions.contains(.driverForceResponseFiles)
@@ -994,6 +997,9 @@ extension Driver {
 
       case .scanDependencies:
         compilerOutputType = .jsonDependencies
+
+      case .scanClangDependencies:
+        compilerOutputType = .jsonClangDependencies
 
       default:
         fatalError("unhandled output mode option \(outputOption)")
@@ -1639,7 +1645,8 @@ extension Driver {
       diagnosticsEngine: diagnosticsEngine, env: env)
 
     // Query the frontend to for target information.
-    var info = try executor.execute(
+    do {
+      var info = try executor.execute(
         job: toolchain.printTargetInfoJob(
           target: explicitTarget, targetVariant: explicitTargetVariant,
           sdkPath: sdkPath, resourceDirPath: resourceDirPath,
@@ -1650,21 +1657,27 @@ extension Driver {
         forceResponseFiles: false,
         recordedInputModificationDates: [:])
 
-    // Parse the runtime compatibility version. If present, it will override
-    // what is reported by the frontend.
-    if let versionString =
-        parsedOptions.getLastArgument(.runtimeCompatibilityVersion)?.asSingle {
-      if let version = SwiftVersion(string: versionString) {
-        info.target.swiftRuntimeCompatibilityVersion = version
-        info.targetVariant?.swiftRuntimeCompatibilityVersion = version
-      } else {
-        diagnosticsEngine.emit(
-          .error_invalid_arg_value(
-            arg: .runtimeCompatibilityVersion, value: versionString))
-      }
-    }
 
-    return (toolchain, info, swiftCompilerPrefixArgs)
+      // Parse the runtime compatibility version. If present, it will override
+      // what is reported by the frontend.
+      if let versionString =
+          parsedOptions.getLastArgument(.runtimeCompatibilityVersion)?.asSingle {
+        if let version = SwiftVersion(string: versionString) {
+          info.target.swiftRuntimeCompatibilityVersion = version
+          info.targetVariant?.swiftRuntimeCompatibilityVersion = version
+        } else {
+          diagnosticsEngine.emit(
+            .error_invalid_arg_value(
+              arg: .runtimeCompatibilityVersion, value: versionString))
+        }
+      }
+
+      return (toolchain, info, swiftCompilerPrefixArgs)
+    } catch is DecodingError {
+      throw Error.unableToDecodeFrontendTargetInfo
+    } catch {
+      throw Error.failedToRetrieveFrontendTargetInfo
+    }
   }
 }
 
@@ -1719,6 +1732,19 @@ extension Driver {
     return try VirtualPath(path: moduleName.appendingFileTypeExtension(type))
   }
 
+  /// Determine if the build system has created a Project/ directory for auxilary outputs.
+  static func computeProjectDirectoryPath(moduleOutputPath: VirtualPath?,
+                                          fileSystem: FileSystem) -> VirtualPath? {
+    let potentialProjectDirectory = moduleOutputPath?
+      .parentDirectory
+      .appending(component: "Project")
+      .absolutePath
+    guard let projectDirectory = potentialProjectDirectory, fileSystem.exists(projectDirectory) else {
+      return nil
+    }
+    return .absolute(projectDirectory)
+  }
+
   /// Determine the output path for a module documentation.
   static func computeModuleDocOutputPath(
     _ parsedOptions: inout ParsedOptions,
@@ -1746,7 +1772,8 @@ extension Driver {
     compilerOutputType: FileType?,
     compilerMode: CompilerMode,
     outputFileMap: OutputFileMap?,
-    moduleName: String
+    moduleName: String,
+    projectDirectory: VirtualPath?
   ) throws -> VirtualPath? {
     guard !parsedOptions.hasArgument(.avoidEmitModuleSourceInfo) else { return nil }
     return try computeModuleAuxiliaryOutputPath(&parsedOptions,
@@ -1757,7 +1784,8 @@ extension Driver {
                                                 compilerOutputType: compilerOutputType,
                                                 compilerMode: compilerMode,
                                                 outputFileMap: outputFileMap,
-                                                moduleName: moduleName)
+                                                moduleName: moduleName,
+                                                projectDirectory: projectDirectory)
   }
 
 
@@ -1771,7 +1799,8 @@ extension Driver {
     compilerOutputType: FileType?,
     compilerMode: CompilerMode,
     outputFileMap: OutputFileMap?,
-    moduleName: String
+    moduleName: String,
+    projectDirectory: VirtualPath? = nil
   ) throws -> VirtualPath? {
     // If there is an explicit argument for the output path, use that
     if let outputPathArg = parsedOptions.getLastArgument(outputPath) {
@@ -1796,24 +1825,20 @@ extension Driver {
         _ = parsedOptions.hasArgument(isOutput)
       }
 
-      return try moduleOutputPath.replacingExtension(with: type)
+      var parentPath: VirtualPath
+      if let projectDirectory = projectDirectory {
+        // If the build system has created a Project dir for us to include the file, use it.
+        parentPath = projectDirectory
+      } else {
+        parentPath = moduleOutputPath.parentDirectory
+      }
+
+      return try parentPath.appending(component: moduleName).replacingExtension(with: type)
     }
 
     // If the output option was not provided, don't produce this output at all.
     guard let isOutput = isOutput, parsedOptions.hasArgument(isOutput) else {
       return nil
-    }
-
-    // If there is an output argument, derive the name from there.
-    if let outputPathArg = parsedOptions.getLastArgument(.o) {
-      let path = try VirtualPath(path: outputPathArg.asSingle)
-
-      // If the compiler output is of this type, use the argument directly.
-      if type == compilerOutputType {
-        return path
-      }
-
-      return try path.replacingExtension(with: type)
     }
 
     return try VirtualPath(path: moduleName.appendingFileTypeExtension(type))

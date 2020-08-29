@@ -10,6 +10,7 @@ add_library(SwiftDriver
   "Explicit Module Builds/ClangModuleBuildJobCache.swift"
   "Explicit Module Builds/ExplicitModuleBuildHandler.swift"
   "Explicit Module Builds/PlaceholderDependencyResolution.swift"
+  "Explicit Module Builds/ClangVersionedDependencyResolution.swift"
   "Explicit Module Builds/InterModuleDependencyGraph.swift"
   "Explicit Module Builds/ModuleDependencyScanning.swift"
   "Explicit Module Builds/ModuleArtifacts.swift"
@@ -49,6 +50,7 @@ add_library(SwiftDriver
   Jobs/Job.swift
   Jobs/LinkJob.swift
   Jobs/MergeModuleJob.swift
+  Jobs/ModuleWrapJob.swift
   Jobs/Planning.swift
   Jobs/PrintTargetInfoJob.swift
   Jobs/ReplJob.swift
@@ -74,10 +76,12 @@ add_library(SwiftDriver
   Utilities/Triple+Platforms.swift
   Utilities/Triple.swift
   Utilities/TypedVirtualPath.swift
+  Utilities/VersionExtensions.swift
   Utilities/VirtualPath.swift)
 
 target_link_libraries(SwiftDriver PUBLIC
   TSCBasic
+  TSCUtility
   SwiftOptions
   llbuildSwift
   CYaml
@@ -89,3 +93,9 @@ set_property(GLOBAL APPEND PROPERTY SWIFTDRIVER_EXPORTS SwiftDriver)
 set_target_properties(SwiftDriver PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 
+if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+  install(TARGETS SwiftDriver
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin)
+endif()

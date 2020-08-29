@@ -81,6 +81,12 @@ public protocol Toolchain {
     parsedOptions: inout ParsedOptions,
     sdkPath: String?,
     targetTriple: Triple) throws -> [String: String]
+
+  func addPlatformSpecificCommonFrontendOptions(
+    commandLine: inout [Job.ArgTemplate],
+    inputs: inout [TypedVirtualPath],
+    frontendTargetInfo: FrontendTargetInfo
+  ) throws
 }
 
 extension Toolchain {
@@ -128,6 +134,13 @@ extension Toolchain {
       return path
     } else if let path = try? xcrunFind(executable: executable) {
       return path
+    } else if !["swift-frontend", "swift"].contains(executable),
+              let parentDirectory = try? getToolPath(.swiftCompiler).parentDirectory,
+              parentDirectory != executableDir,
+              let path = lookupExecutablePath(filename: executable, searchPaths: [parentDirectory]) {
+      // If the driver library's client and the frontend are in different directories,
+      // try looking for tools next to the frontend.
+      return path
     } else if let path = lookupExecutablePath(filename: executable, searchPaths: searchPaths) {
       return path
     } else if executable == "swift-frontend" {
@@ -156,6 +169,12 @@ extension Toolchain {
   public func validateArgs(_ parsedOptions: inout ParsedOptions,
                            targetTriple: Triple,
                            targetVariantTriple: Triple?, diagnosticsEngine: DiagnosticsEngine) {}
+
+  public func addPlatformSpecificCommonFrontendOptions(
+    commandLine: inout [Job.ArgTemplate],
+    inputs: inout [TypedVirtualPath],
+    frontendTargetInfo: FrontendTargetInfo
+  ) throws {}
 }
 
 public enum ToolchainError: Swift.Error {

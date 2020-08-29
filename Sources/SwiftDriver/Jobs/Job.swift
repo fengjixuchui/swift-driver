@@ -23,6 +23,7 @@ public struct Job: Codable, Equatable, Hashable {
     case autolinkExtract = "autolink-extract"
     case emitModule = "emit-module"
     case generatePCH = "generate-pch"
+    case moduleWrap = "module-wrap"
 
     /// Generate a compiled Clang module.
     case generatePCM = "generate-pcm"
@@ -32,6 +33,7 @@ public struct Job: Codable, Equatable, Hashable {
     case printTargetInfo = "print-target-info"
     case versionRequest = "version-request"
     case scanDependencies = "scan-dependencies"
+    case scanClangDependencies = "scan-clang-dependencies"
     case help
   }
 
@@ -41,6 +43,9 @@ public struct Job: Codable, Equatable, Hashable {
 
     /// Represents a virtual path on disk.
     case path(VirtualPath)
+
+    /// Represents a response file path prefixed by '@'.
+    case responseFilePath(VirtualPath)
   }
 
   /// The Swift module this job involves.
@@ -145,8 +150,11 @@ extension Job : CustomStringConvertible {
     case .generatePCH:
         return "Compiling bridging header \(displayInputs.first?.file.basename ?? "")"
 
+    case .moduleWrap:
+      return "Wrapping Swift module \(moduleName)"
+
     case .generatePCM:
-        return "Compiling Clang module \(displayInputs.first?.file.basename  ?? "")"
+        return "Compiling Clang module \(moduleName)"
 
     case .interpret:
         return "Interpreting \(displayInputs.first?.file.name ?? "")"
@@ -171,6 +179,9 @@ extension Job : CustomStringConvertible {
 
     case .scanDependencies:
       return "Scanning dependencies for module \(moduleName)"
+
+    case .scanClangDependencies:
+      return "Scanning dependencies for Clang module \(moduleName)"
     }
   }
 }
@@ -181,10 +192,10 @@ extension Job.Kind {
     switch self {
     case .backend, .compile, .mergeModule, .emitModule, .generatePCH,
         .generatePCM, .interpret, .repl, .printTargetInfo,
-        .versionRequest, .scanDependencies:
+        .versionRequest, .scanDependencies, .scanClangDependencies:
         return true
 
-    case .autolinkExtract, .generateDSYM, .help, .link, .verifyDebugInfo:
+    case .autolinkExtract, .generateDSYM, .help, .link, .verifyDebugInfo, .moduleWrap:
         return false
     }
   }
@@ -197,7 +208,8 @@ extension Job.Kind {
     case .backend, .mergeModule, .emitModule, .generatePCH,
          .generatePCM, .interpret, .repl, .printTargetInfo,
          .versionRequest, .autolinkExtract, .generateDSYM,
-         .help, .link, .verifyDebugInfo, .scanDependencies:
+         .help, .link, .verifyDebugInfo, .scanDependencies,
+         .moduleWrap, .scanClangDependencies:
       return false
     }
   }
@@ -206,7 +218,7 @@ extension Job.Kind {
 
 extension Job.ArgTemplate: Codable {
   private enum CodingKeys: String, CodingKey {
-    case flag, path
+    case flag, path, responseFilePath
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -217,6 +229,9 @@ extension Job.ArgTemplate: Codable {
       try unkeyedContainer.encode(a1)
     case let .path(a1):
       var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .path)
+      try unkeyedContainer.encode(a1)
+    case let .responseFilePath(a1):
+      var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .responseFilePath)
       try unkeyedContainer.encode(a1)
     }
   }
@@ -235,6 +250,10 @@ extension Job.ArgTemplate: Codable {
       var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
       let a1 = try unkeyedValues.decode(VirtualPath.self)
       self = .path(a1)
+    case .responseFilePath:
+      var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
+      let a1 = try unkeyedValues.decode(VirtualPath.self)
+      self = .responseFilePath(a1)
     }
   }
 }

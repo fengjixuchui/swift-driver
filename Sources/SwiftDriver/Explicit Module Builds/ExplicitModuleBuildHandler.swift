@@ -34,9 +34,6 @@ public typealias ExternalDependencyArtifactMap =
   /// The toolchain to be used for frontend job generation.
   private let toolchain: Toolchain
 
-  /// A collection of external dependency modules, and their binary module file paths and dependency graph.
-  internal let externalDependencyArtifactMap: ExternalDependencyArtifactMap
-
   /// The file system which we should interact with.
   /// FIXME: Our end goal is to not have any direct filesystem manipulation in here, but  that's dependent on getting the
   /// dependency scanner/dependency job generation  moved into a Job.
@@ -48,12 +45,11 @@ public typealias ExternalDependencyArtifactMap =
   /// dependency scanner/dependency job generation  moved into a Job.
   private let temporaryDirectory: AbsolutePath
 
-  public init(dependencyGraph: InterModuleDependencyGraph, toolchain: Toolchain,
-              fileSystem: FileSystem,
-              externalDependencyArtifactMap: ExternalDependencyArtifactMap) throws {
+  public init(dependencyGraph: InterModuleDependencyGraph,
+              toolchain: Toolchain,
+              fileSystem: FileSystem) throws {
     self.dependencyGraph = dependencyGraph
     self.toolchain = toolchain
-    self.externalDependencyArtifactMap = externalDependencyArtifactMap
     self.fileSystem = fileSystem
     self.temporaryDirectory = try determineTempDirectory()
   }
@@ -119,11 +115,6 @@ public typealias ExternalDependencyArtifactMap =
   /// - Generate Job: S1
   ///
   mutating public func generateExplicitModuleDependenciesBuildJobs() throws -> [Job] {
-    // Resolve placeholder dependencies in the dependency graph, if any.
-    if (!externalDependencyArtifactMap.isEmpty) {
-      try resolvePlaceholderDependencies()
-    }
-
     // Compute jobs for all main module dependencies
     var mainModuleInputs: [TypedVirtualPath] = []
     var mainModuleCommandLine: [Job.ArgTemplate] = []
@@ -351,11 +342,15 @@ public typealias ExternalDependencyArtifactMap =
     let dependencyInfo = try dependencyGraph.moduleInfo(of: dependencyId)
 
     let swiftModulePath: TypedVirtualPath
+    let isFramework: Bool
     if case .swift(let details) = dependencyInfo.details,
        let compiledModulePath = details.explicitCompiledModulePath {
       // If an already-compiled module is available, use it.
       swiftModulePath = .init(file: try VirtualPath(path: compiledModulePath),
                               type: .swiftModule)
+      // Since this module has already been built, it is no longer relevant
+      // whether it is a framework or not.
+      isFramework = false
     } else {
       // Generate a build job for the dependency module, if not already generated
       if swiftModuleBuildCache[dependencyId] == nil {
@@ -364,13 +359,15 @@ public typealias ExternalDependencyArtifactMap =
       }
       swiftModulePath = .init(file: try VirtualPath(path: dependencyInfo.modulePath),
                               type: .swiftModule)
+      isFramework = try dependencyGraph.swiftModuleDetails(of: dependencyId).isFramework
     }
 
     // Collect the required information about this module
     // TODO: add .swiftdoc and .swiftsourceinfo for this module.
     swiftDependencyArtifacts.append(
       SwiftModuleArtifactInfo(name: dependencyId.moduleName,
-                              modulePath: swiftModulePath.file.description))
+                              modulePath: swiftModulePath.file.description,
+                              isFramework: isFramework))
 
     // Process all transitive dependencies as direct
     try addModuleDependencies(moduleId: dependencyId, pcmArgs: pcmArgs,
@@ -444,7 +441,7 @@ extension ExplicitModuleBuildHandler {
 
 /// Encapsulates some of the common queries of the ExplicitModuleBuildeHandler with error-checking
 /// on the dependency graph's structure.
-private extension InterModuleDependencyGraph {
+internal extension InterModuleDependencyGraph {
   func moduleInfo(of moduleId: ModuleDependencyId) throws -> ModuleInfo {
     guard let moduleInfo = modules[moduleId] else {
       throw Driver.Error.missingModuleDependency(moduleId.moduleName)

@@ -2,10 +2,17 @@
 import PackageDescription
 import class Foundation.ProcessInfo
 
+let macOSPlatform: SupportedPlatform
+if let deploymentTarget = ProcessInfo.processInfo.environment["SWIFTPM_MACOS_DEPLOYMENT_TARGET"] {
+    macOSPlatform = .macOS(deploymentTarget)
+} else {
+    macOSPlatform = .macOS(.v10_10)
+}
+
 let package = Package(
   name: "swift-driver",
   platforms: [
-    .macOS(.v10_10),
+    macOSPlatform,
   ],
   products: [
     .executable(
@@ -74,7 +81,7 @@ if ProcessInfo.processInfo.environment["SWIFT_DRIVER_LLBUILD_FWK"] == nil {
 if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
   package.dependencies += [
     .package(url: "https://github.com/apple/swift-tools-support-core.git", .branch("master")),
-    .package(url: "https://github.com/jpsim/Yams.git", .branch("master")),
+    .package(url: "https://github.com/jpsim/Yams.git", .upToNextMinor(from: "4.0.0")),
     ]
 } else {
     package.dependencies += [

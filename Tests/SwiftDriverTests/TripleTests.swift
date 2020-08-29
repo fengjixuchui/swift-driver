@@ -842,6 +842,36 @@ final class TripleTests: XCTestCase {
     XCTAssertEqual(V?.minor, 0)
     XCTAssertEqual(V?.micro, 0)
 
+    T = Triple("x86_64-apple-darwin20")
+    XCTAssertTrue(T.os?.isMacOSX)
+    XCTAssertFalse(T.os?.isiOS)
+    XCTAssertFalse(T.arch?.is16Bit)
+    XCTAssertFalse(T.arch?.is32Bit)
+    XCTAssertTrue(T.arch?.is64Bit)
+    V = T._macOSVersion
+    XCTAssertEqual(V?.major, 11)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+    V = T._iOSVersion
+    XCTAssertEqual(V?.major, 5)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+
+    T = Triple("x86_64-apple-darwin21")
+    XCTAssertTrue(T.os?.isMacOSX)
+    XCTAssertFalse(T.os?.isiOS)
+    XCTAssertFalse(T.arch?.is16Bit)
+    XCTAssertFalse(T.arch?.is32Bit)
+    XCTAssertTrue(T.arch?.is64Bit)
+    V = T._macOSVersion
+    XCTAssertEqual(V?.major, 12)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+    V = T._iOSVersion
+    XCTAssertEqual(V?.major, 5)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+
     T = Triple("x86_64-apple-macosx")
     XCTAssertTrue(T.os?.isMacOSX)
     XCTAssertFalse(T.os?.isiOS)
@@ -866,6 +896,51 @@ final class TripleTests: XCTestCase {
     V = T._macOSVersion
     XCTAssertEqual(V?.major, 10)
     XCTAssertEqual(V?.minor, 7)
+    XCTAssertEqual(V?.micro, 0)
+    V = T._iOSVersion
+    XCTAssertEqual(V?.major, 5)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+
+    T = Triple("x86_64-apple-macosx11.0")
+    XCTAssertTrue(T.os?.isMacOSX)
+    XCTAssertFalse(T.os?.isiOS)
+    XCTAssertFalse(T.arch?.is16Bit)
+    XCTAssertFalse(T.arch?.is32Bit)
+    XCTAssertTrue(T.arch?.is64Bit)
+    V = T._macOSVersion
+    XCTAssertEqual(V?.major, 11)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+    V = T._iOSVersion
+    XCTAssertEqual(V?.major, 5)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+
+    T = Triple("x86_64-apple-macosx11.1")
+    XCTAssertTrue(T.os?.isMacOSX)
+    XCTAssertFalse(T.os?.isiOS)
+    XCTAssertFalse(T.arch?.is16Bit)
+    XCTAssertFalse(T.arch?.is32Bit)
+    XCTAssertTrue(T.arch?.is64Bit)
+    V = T._macOSVersion
+    XCTAssertEqual(V?.major, 11)
+    XCTAssertEqual(V?.minor, 1)
+    XCTAssertEqual(V?.micro, 0)
+    V = T._iOSVersion
+    XCTAssertEqual(V?.major, 5)
+    XCTAssertEqual(V?.minor, 0)
+    XCTAssertEqual(V?.micro, 0)
+
+    T = Triple("x86_64-apple-macosx12.0")
+    XCTAssertTrue(T.os?.isMacOSX)
+    XCTAssertFalse(T.os?.isiOS)
+    XCTAssertFalse(T.arch?.is16Bit)
+    XCTAssertFalse(T.arch?.is32Bit)
+    XCTAssertTrue(T.arch?.is64Bit)
+    V = T._macOSVersion
+    XCTAssertEqual(V?.major, 12)
+    XCTAssertEqual(V?.minor, 0)
     XCTAssertEqual(V?.micro, 0)
     V = T._iOSVersion
     XCTAssertEqual(V?.major, 5)
@@ -933,7 +1008,9 @@ final class TripleTests: XCTestCase {
   }
 
   func testFileFormat() {
-//    XCTAssertEqual(.elf, Triple("i686-unknown-linux-gnu").objectFormat)
+    XCTAssertEqual(.elf, Triple("i686-unknown-linux-gnu").objectFormat)
+    XCTAssertEqual(.elf, Triple("x86_64-unknown-linux-gnu").objectFormat)
+    XCTAssertEqual(.elf, Triple("x86_64-gnu-linux").objectFormat)
     XCTAssertEqual(.elf, Triple("i686-unknown-freebsd").objectFormat)
     XCTAssertEqual(.elf, Triple("i686-unknown-netbsd").objectFormat)
     XCTAssertEqual(.elf, Triple("i686--win32-elf").objectFormat)
