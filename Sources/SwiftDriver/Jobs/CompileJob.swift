@@ -199,11 +199,13 @@ extension Driver {
       }
     }
 
-    if parsedOptions.contains(.debugInfoStoreInvocation) &&
+    if parsedOptions.contains(.debugInfoStoreInvocation) ||
        toolchain.shouldStoreInvocationInDebugInfo {
       commandLine.appendFlag(.debugInfoStoreInvocation)
     }
 
+    try commandLine.appendLast(.trackSystemDependencies, from: &parsedOptions)
+    try commandLine.appendLast(.CrossModuleOptimization, from: &parsedOptions)
     try commandLine.appendLast(.disableAutolinkingRuntimeCompatibility, from: &parsedOptions)
     try commandLine.appendLast(.runtimeCompatibilityVersion, from: &parsedOptions)
     try commandLine.appendLast(.disableAutolinkingRuntimeCompatibilityDynamicReplacements, from: &parsedOptions)

@@ -117,6 +117,26 @@ final class SwiftDriverTests: XCTestCase {
     }
   }
 
+  func testJoinedPathOptions() throws {
+    var driver = try Driver(args: ["swiftc", "-c", "-I=/some/dir", "-F=other/relative/dir", "foo.swift"])
+    let jobs = try driver.planBuild()
+    XCTAssertTrue(jobs[0].commandLine.contains(.joinedOptionAndPath("-I=", .absolute(.init("/some/dir")))))
+    XCTAssertTrue(jobs[0].commandLine.contains(.joinedOptionAndPath("-F=", .relative(.init("other/relative/dir")))))
+  }
+
+  func testRelativeOptionOrdering() throws {
+    var driver = try Driver(args: ["swiftc", "foo.swift",
+                                   "-F", "/path/to/frameworks",
+                                   "-Fsystem", "/path/to/systemframeworks",
+                                   "-F", "/path/to/more/frameworks"])
+    let jobs = try driver.planBuild()
+    XCTAssertEqual(jobs[0].kind, .compile)
+    // The relative ordering of -F and -Fsystem options should be preserved.
+    XCTAssertTrue(jobs[0].commandLine.contains(subsequence: [.flag("-F"), .path(.absolute(.init("/path/to/frameworks"))),
+                                                             .flag("-Fsystem"), .path(.absolute(.init("/path/to/systemframeworks"))),
+                                                             .flag("-F"), .path(.absolute(.init("/path/to/more/frameworks")))]))
+  }
+
   func testBatchModeDiagnostics() throws {
       try assertNoDriverDiagnostics(args: "swiftc", "-enable-batch-mode") { driver in
         switch driver.compilerMode {
@@ -313,8 +333,8 @@ final class SwiftDriverTests: XCTestCase {
     }
 
     try assertDriverDiagnostics(args: "swiftc", "foo.swift", "-debug-prefix-map", "foo", "-debug-prefix-map", "bar") {
-        $1.expect(.error("values for '-debug-prefix-map' must be in the format original=remapped not 'foo'"))
-        $1.expect(.error("values for '-debug-prefix-map' must be in the format original=remapped not 'bar'"))
+        $1.expect(.error("values for '-debug-prefix-map' must be in the format 'original=remapped', but 'foo' was provided"))
+        $1.expect(.error("values for '-debug-prefix-map' must be in the format 'original=remapped', but 'bar' was provided"))
     }
 
     try assertNoDriverDiagnostics(args: "swiftc", "foo.swift", "-emit-module", "-g", "-debug-info-format=codeview") { driver in
@@ -345,8 +365,8 @@ final class SwiftDriverTests: XCTestCase {
     }
 
     try assertDriverDiagnostics(args: "swiftc", "foo.swift", "-coverage-prefix-map", "foo", "-coverage-prefix-map", "bar") {
-      $1.expect(.error("values for '-coverage-prefix-map' must be in the format original=remapped not 'foo'"))
-      $1.expect(.error("values for '-coverage-prefix-map' must be in the format original=remapped not 'bar'"))
+      $1.expect(.error("values for '-coverage-prefix-map' must be in the format 'original=remapped', but 'foo' was provided"))
+      $1.expect(.error("values for '-coverage-prefix-map' must be in the format 'original=remapped', but 'bar' was provided"))
     }
   }
 
@@ -831,6 +851,30 @@ final class SwiftDriverTests: XCTestCase {
       XCTAssertFalse(cmd.contains(.flag("-dylib")))
       XCTAssertFalse(cmd.contains(.flag("-shared")))
     }
+
+    #if os(macOS)
+    // dsymutil won't be found on Linux.
+    do {
+      var driver = try Driver(args: commonArgs + ["-emit-executable", "-emit-module", "-g", "-target", "x86_64-apple-macosx10.15"], env: env)
+      let plannedJobs = try driver.planBuild()
+      XCTAssertEqual(5, plannedJobs.count)
+      XCTAssertEqual(plannedJobs.map(\.kind), [.compile, .compile, .mergeModule, .link, .generateDSYM])
+
+      let linkJob = plannedJobs[3]
+      XCTAssertEqual(linkJob.kind, .link)
+
+      let cmd = linkJob.commandLine
+      XCTAssertTrue(cmd.contains(.flag("-o")))
+      XCTAssertTrue(cmd.contains(.path(.temporary(RelativePath("foo.o")))))
+      XCTAssertTrue(cmd.contains(.path(.temporary(RelativePath("bar.o")))))
+      XCTAssertTrue(cmd.contains(subsequence: [.flag("-add_ast_path"), .path(.relative(.init("Test.swiftmodule")))]))
+      XCTAssertEqual(linkJob.outputs[0].file, try VirtualPath(path: "Test"))
+
+      XCTAssertFalse(cmd.contains(.flag("-static")))
+      XCTAssertFalse(cmd.contains(.flag("-dylib")))
+      XCTAssertFalse(cmd.contains(.flag("-shared")))
+    }
+    #endif
 
     // FIXME: This test will fail when run on macOS, because
     // swift-autolink-extract is not present
